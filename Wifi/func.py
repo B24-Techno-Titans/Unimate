@@ -1,0 +1,82 @@
+FAN_URL = "http://fan-controller.local/set-speed"
+LED_URL = "http://led-controller.local/set-colour"
+
+import asyncio
+import requests
+import math
+import LuxSensor
+
+auto_light_on = False
+
+def control_fan(speed: int):
+    try:
+        requests.get(f"{FAN_URL}?speed={speed}", timeout=4)
+    except Exception as e:
+        print(f"Error controlling fan: {e}")
+
+def control_light(**kwargs):
+    params = {}
+    colour = kwargs.get("rgb", None)
+    brightness = kwargs.get("brightness", None)
+
+    if(colour != None): params["rgb"] = colour
+    if(brightness != None): params["brightness"] = brightness
+
+    try:
+        response = requests.get(LED_URL, params=params, timeout=5)
+        
+        if response.status_code == 200:
+            # print("Colour change requested successfully")
+            # print("ESP32 says:", response.text)
+            pass
+        else:
+            print(f"Failed with status code: {response.status_code}")
+
+    except requests.exceptions.RequestException as e:
+        print(f"Connection Error: {e}")
+
+
+
+def lux_to_brightness(lux, Lmax=500):
+    """
+    Convert ambient light in lux to brightness (0-255).
+    
+    Parameters:
+        lux (float): Current lux reading from sensor
+        Lmax (float): Maximum expected lux value (default = 1000 for indoor use)
+    
+    Returns:
+        int: Brightness value between 0 and 255
+    """
+    # Prevent division by zero or negative lux
+    lux = max(lux, 0)
+    
+    # Logarithmic mapping
+    # brightness = 255 * (math.log(1 + lux) / math.log(1 + Lmax))
+    brightness = 255 * (1 - (math.log(1 + lux) / math.log(1 + Lmax)))
+    
+    # Limit to 0–255 range
+    return int(min(150, max(0, brightness)))
+
+# Test Values
+# lux_values = [0, 10, 100, 500, 1000]
+# for lux in lux_values:
+#     print(f"Lux: {lux} -> Brightness: {lux_to_brightness(lux)}")
+
+async def autoBrightness():
+    global auto_light_on
+    while(auto_light_on):
+        lux = LuxSensor.get_lux()
+        b = lux_to_brightness(lux)
+        # print(f"Lux : {lux} lx\t b = {b}")
+        control_light(brightness=b)
+
+        await asyncio.sleep(0.1)
+
+def stopAutoBrightness():
+    global auto_light_on
+    auto_light_on = False
+
+
+
+

@@ -1,0 +1,92 @@
+###############################################
+# MediaMTX minimal config for Raspberry Pi
+###############################################
+
+logLevel: info
+logDestinations: [stdout]
+
+# Global timeouts
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 512
+udpMaxPayloadSize: 1472
+
+# Authentication
+authMethod: internal
+authInternalUsers:
+- user: any
+  pass:
+  ips: []
+  permissions:
+  - action: publish
+  - action: read
+  - action: playback
+
+###############################################
+# Servers
+
+# RTSP
+rtsp: yes
+protocols: [udp, multicast, tcp]
+encryption: "no"
+rtspAddress: :8554
+rtpAddress: :8000
+rtcpAddress: :8001
+multicastIPRange: 224.1.0.0/16
+multicastRTPPort: 8002
+multicastRTCPPort: 8003
+
+# RTMP (disabled)
+rtmp: no
+
+# HLS
+hls: yes
+hlsAddress: :8888
+hlsEncryption: no
+hlsDirectory: /home/unimate/Unimate/Livefeed/hls
+hlsAlwaysRemux: yes
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsSegmentMaxSize: 50M
+hlsAllowOrigin: '*'
+
+# WebRTC (disabled)
+webrtc: no
+
+# SRT (disabled)
+srt: no
+
+###############################################
+# Default path settings
+pathDefaults:
+  source: rpiCamera
+  maxReaders: 0
+
+  # Recording
+  record: no
+  recordPath: /home/unimate/Unimate/Livefeed/recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordFormat: fmp4
+  recordPartDuration: 1s
+  recordSegmentDuration: 1h
+  recordDeleteAfter: 24h
+
+  # RPi Camera
+  rpiCameraCamID: 0
+  rpiCameraWidth: 1920
+  rpiCameraHeight: 1080
+  rpiCameraFPS: 30
+  rpiCameraHFlip: false
+  rpiCameraVFlip: false
+  rpiCameraCodec: auto
+  rpiCameraBitrate: 1000000
+  rpiCameraProfile: main
+  rpiCameraLevel: '4.1'
+  rpiCameraTextOverlayEnable: false
+
+###############################################
+# Paths
+paths:
+  cam:
+    source: rpiCamera
