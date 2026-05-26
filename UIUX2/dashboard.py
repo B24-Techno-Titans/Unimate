@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import math
 import random
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from kivy.animation import Animation
 from kivy.clock import Clock
 from kivy.core.image import Image as CoreImage
-from kivy.graphics import Color, Line, PopMatrix, PushMatrix, Rectangle, Rotate, RoundedRectangle
+from kivy.graphics import Color, InstructionGroup, Line, PopMatrix, PushMatrix, Rectangle, Rotate, RoundedRectangle
 from kivy.graphics.texture import Texture
 from kivy.graphics.vertex_instructions import Ellipse
 from kivy.metrics import dp, sp
@@ -21,6 +23,7 @@ from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
+from kivy.uix.popup import Popup
 from kivy.uix.screenmanager import Screen
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.slider import Slider
@@ -37,6 +40,7 @@ _DEVICE_ICON_FILES = {
 }
 _icon_texture_cache: dict[str, object] = {}
 _sensor_icon_cache: dict[str, object] = {}
+_study_icon_cache: dict[str, object] = {}
 
 # Sensors dashboard — sized for 1024×600 kiosk
 SENSOR_PAD = dp(14)
@@ -67,6 +71,15 @@ def _sensor_icon_texture(filename: str):
             raise FileNotFoundError(f"Sensor icon not found: {path}")
         _sensor_icon_cache[filename] = CoreImage(str(path)).texture
     return _sensor_icon_cache[filename]
+
+
+def _study_icon_texture(filename: str):
+    if filename not in _study_icon_cache:
+        path = _ICONS_DIR / filename
+        if not path.is_file():
+            raise FileNotFoundError(f"Study icon not found: {path}")
+        _study_icon_cache[filename] = CoreImage(str(path)).texture
+    return _study_icon_cache[filename]
 
 
 # Controls grid — sized for 1024×600 windowed / fullscreen kiosk
@@ -192,29 +205,30 @@ def _build_hsv_wheel_texture(size: int) -> Texture:
 
 
 # ---------------------------------------------------------------------------
-# Study bank (same ideas as legacy Tkinter kiosk)
+# Study dashboard
 # ---------------------------------------------------------------------------
 
-STUDY_MCQ: list[dict[str, object]] = [
-    {
-        "q": "What gas do plants take in for photosynthesis?",
-        "options": ["Oxygen", "Carbon dioxide", "Nitrogen", "Hydrogen"],
-        "correct": 1,
-        "explain": "Plants use CO₂ with light to make sugars and release O₂.",
-    },
-    {
-        "q": "Newton's first law is about…",
-        "options": ["Gravity", "Inertia", "Friction", "Mass × acceleration"],
-        "correct": 1,
-        "explain": "An object stays at rest or in uniform motion unless a net force acts.",
-    },
-    {
-        "q": "In Python, what starts a function definition?",
-        "options": ["func", "def", "function", "fn"],
-        "correct": 1,
-        "explain": "Use def name(args): to define a function.",
-    },
-]
+_STUDY_TONE_PATH = Path(__file__).resolve().parent / "tone.mp3"
+STUDY_PAD = dp(16)
+STUDY_HEADER_H = dp(56)
+STUDY_GRID_GAP = dp(12)
+STUDY_TILE_LABEL = sp(15)
+STUDY_TILE_ICON = dp(108)
+STUDY_TITLE = sp(40)
+STUDY_WHEEL_ROW_H = dp(44)
+STUDY_WHEEL_VISIBLE_ROWS = 5
+STUDY_WHEEL_SCROLL_ANIM_S = 0.22
+STUDY_WHEEL_SCROLL_SETTLE_S = 0.08
+STUDY_WHEEL_CENTER_ROW = (STUDY_WHEEL_VISIBLE_ROWS - 1) // 2
+
+
+def _format_timer_seconds(total: int) -> str:
+    total = max(0, int(total))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +296,305 @@ class GlowPanel(BoxLayout):
         for ln in self._glow_lines:
             ln.rounded_rectangle = rr
         self._hairline.rounded_rectangle = rr
+
+# Study dashboard widgets (require GlowPanel)
+# ---------------------------------------------------------------------------
+
+class StudyTileIcon(Widget):
+    """Study tile icon from UIUX2/icons PNG assets."""
+
+    def __init__(self, icon_file: str, **kwargs):
+        super().__init__(**kwargs)
+        self._texture = _study_icon_texture(icon_file)
+        self.bind(pos=self._draw, size=self._draw)
+
+    def _draw(self, *_args) -> None:
+        self.canvas.clear()
+        if self.width < 4 or self.height < 4:
+            return
+        side = min(self.width, self.height) * 0.9
+        ix = self.center_x - side / 2
+        iy = self.center_y - side / 2
+        with self.canvas:
+            Color(1, 1, 1, 1)
+            Rectangle(texture=self._texture, pos=(ix, iy), size=(side, side))
+
+
+class StudyTile(GlowPanel):
+    """Neon study feature tile — icon, label, optional tap handler."""
+
+    def __init__(
+        self,
+        icon_file: str,
+        label: str,
+        *,
+        on_tap: Callable[[], None] | None = None,
+        **kwargs,
+    ):
+        super().__init__(
+            orientation="vertical",
+            padding=(dp(12), dp(14), dp(12), dp(10)),
+            spacing=dp(6),
+            **kwargs,
+        )
+        self.icon_file = icon_file
+        self._base_label = label
+        self._on_tap = on_tap
+        self._alarm_mode = False
+
+        icon_holder = AnchorLayout(size_hint_y=1)
+        icon_holder.add_widget(
+            StudyTileIcon(
+                icon_file,
+                size_hint=(None, None),
+                size=(STUDY_TILE_ICON, STUDY_TILE_ICON),
+            )
+        )
+        self.caption = Label(
+            text=label,
+            font_size=STUDY_TILE_LABEL,
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            halign="center",
+            valign="middle",
+            size_hint_y=None,
+            height=dp(44),
+        )
+        self.caption.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+        self.add_widget(icon_holder)
+        self.add_widget(self.caption)
+
+    def set_caption(self, text: str, *, accent: tuple[float, float, float, float] | None = None) -> None:
+        self.caption.text = text
+        if accent is not None:
+            self.caption.color = accent
+
+    def set_alarm_mode(self, active: bool) -> None:
+        self._alarm_mode = active
+        if active:
+            self.set_caption("TIME'S UP\nTAP TO SILENCE", accent=Theme.WARN)
+        else:
+            self.set_caption(self._base_label, accent=Theme.ACCENT_SOFT)
+
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos) and self._on_tap is not None:
+            self._on_tap()
+            return True
+        return super().on_touch_down(touch)
+
+
+class WheelRow(Button):
+    """Row that allows ScrollView drags; tap only when finger did not scroll."""
+
+    _tap_slop = dp(16)
+
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos):
+            touch.ud["wheel_row"] = self
+            touch.ud["wheel_row_y"] = touch.y
+        return False
+
+    def on_touch_up(self, touch):
+        if touch.ud.get("wheel_row") is not self:
+            return False
+        if not self.collide_point(*touch.pos):
+            return False
+        if abs(touch.y - touch.ud.get("wheel_row_y", touch.y)) <= self._tap_slop:
+            self.dispatch("on_press")
+        return False
+
+
+class WheelPickerColumn(BoxLayout):
+    """Scrollable numeric column — drag to scroll, snap on release, or tap a row."""
+
+    def __init__(
+        self,
+        title: str,
+        values: list[int],
+        *,
+        initial: int = 0,
+        on_change: Callable[[int], None] | None = None,
+        **kwargs,
+    ):
+        super().__init__(orientation="vertical", spacing=dp(4), **kwargs)
+        self._values = values
+        self._selected = initial if initial in values else values[0]
+        self._on_change = on_change
+        self._row_buttons: list[Button] = []
+        self._suppress_snap = False
+        self._settle_ev = None
+        self._scroll_anim: Animation | None = None
+        self._defer_on_change = False
+
+        hdr = Label(
+            text=title,
+            font_size=Theme.CAPTION,
+            bold=True,
+            color=Theme.MUTED,
+            size_hint_y=None,
+            height=dp(22),
+        )
+        self.add_widget(hdr)
+
+        pad = STUDY_WHEEL_CENTER_ROW * STUDY_WHEEL_ROW_H
+        self.scroll = ScrollView(
+            size_hint_y=1,
+            do_scroll_x=False,
+            bar_width=dp(3),
+            scroll_type=["bars", "content"],
+        )
+        inner = BoxLayout(orientation="vertical", size_hint_y=None, padding=(0, pad, 0, pad))
+        inner.bind(minimum_height=inner.setter("height"))
+
+        for val in values:
+            btn = WheelRow(
+                text=f"{val:02d}",
+                size_hint_y=None,
+                height=STUDY_WHEEL_ROW_H,
+                font_size=sp(20),
+                bold=True,
+                background_normal="",
+                background_down="",
+            )
+            btn._wheel_value = val  # type: ignore[attr-defined]
+
+            def _pick(instance, v=val):
+                self.set_value(v, scroll=True, animate=True)
+
+            btn.bind(on_press=_pick)
+            inner.add_widget(btn)
+            self._row_buttons.append(btn)
+
+        self.scroll.add_widget(inner)
+        self._inner = inner
+        self.add_widget(self.scroll)
+        self.scroll.bind(scroll_y=self._on_scroll_y, on_scroll_stop=self._on_scroll_stop)
+        Clock.schedule_once(
+            lambda _dt: self.set_value(self._selected, scroll=True, animate=False),
+            0,
+        )
+
+    @property
+    def value(self) -> int:
+        return self._selected
+
+    def _scroll_range(self) -> float:
+        return max(1.0, self._inner.height - self.scroll.height)
+
+    def _index_to_scroll_y(self, idx: int) -> float:
+        idx = max(0, min(idx, len(self._values) - 1))
+        # Top padding already offsets the center row; content offset is idx * row height.
+        target_y = idx * STUDY_WHEEL_ROW_H
+        return 1.0 - min(1.0, target_y / self._scroll_range())
+
+    def _scroll_y_to_index(self) -> int:
+        content_offset = (1.0 - self.scroll.scroll_y) * self._scroll_range()
+        idx = round(content_offset / STUDY_WHEEL_ROW_H)
+        return max(0, min(idx, len(self._values) - 1))
+
+    def _cancel_settle(self) -> None:
+        if self._settle_ev is not None:
+            self._settle_ev.cancel()
+            self._settle_ev = None
+
+    def _cancel_scroll_anim(self) -> None:
+        if self._scroll_anim is not None:
+            self._scroll_anim.cancel(self.scroll)
+            self._scroll_anim.unbind(on_complete=self._on_scroll_anim_complete)
+            self._scroll_anim = None
+        self._suppress_snap = False
+        self._defer_on_change = False
+
+    def _apply_highlight(self, val: int) -> None:
+        for btn in self._row_buttons:
+            selected = btn._wheel_value == val  # type: ignore[attr-defined]
+            btn.background_color = Theme.CYAN if selected else Theme.PANEL_HI
+            btn.color = Theme.BLACK if selected else Theme.TEXT
+
+    def _on_scroll_anim_complete(self, *_args) -> None:
+        self._scroll_anim = None
+        self._suppress_snap = False
+        if self._defer_on_change:
+            self._defer_on_change = False
+            if self._on_change:
+                self._on_change(self._selected)
+
+    def _scroll_to_index(self, idx: int, *, animate: bool) -> None:
+        target_y = self._index_to_scroll_y(idx)
+        if not animate:
+            self.scroll.scroll_y = target_y
+            return
+        self._suppress_snap = True
+        self._cancel_scroll_anim()
+        self._scroll_anim = Animation(
+            scroll_y=target_y,
+            duration=STUDY_WHEEL_SCROLL_ANIM_S,
+            transition="out_cubic",
+        )
+        self._scroll_anim.bind(on_complete=self._on_scroll_anim_complete)
+        self._scroll_anim.start(self.scroll)
+
+    def _sync_selection_from_scroll(self) -> None:
+        idx = self._scroll_y_to_index()
+        val = self._values[idx]
+        if val != self._selected:
+            self._selected = val
+            self._apply_highlight(val)
+
+    def _on_scroll_y(self, *_args) -> None:
+        if self._suppress_snap:
+            return
+        self._sync_selection_from_scroll()
+        self._cancel_settle()
+        self._settle_ev = Clock.schedule_once(self._snap_to_nearest, STUDY_WHEEL_SCROLL_SETTLE_S)
+
+    def _on_scroll_stop(self, *_args) -> None:
+        if self._suppress_snap:
+            return
+        self._cancel_settle()
+        self._snap_to_nearest()
+
+    def _snap_to_nearest(self, *_dt) -> None:
+        self._settle_ev = None
+        if self._suppress_snap:
+            return
+        idx = self._scroll_y_to_index()
+        val = self._values[idx]
+        changed = val != self._selected
+        self._selected = val
+        self._apply_highlight(val)
+        target_y = self._index_to_scroll_y(idx)
+        self._cancel_scroll_anim()
+        if abs(self.scroll.scroll_y - target_y) < 0.002:
+            if changed and self._on_change:
+                self._on_change(val)
+            return
+        if changed:
+            self._defer_on_change = True
+        self._scroll_to_index(idx, animate=True)
+
+    def set_value(self, val: int, *, scroll: bool = False, animate: bool = True) -> None:
+        if val not in self._values:
+            val = self._values[0]
+        changed = val != self._selected
+        self._selected = val
+        self._apply_highlight(val)
+        if scroll:
+            self._cancel_settle()
+            self._cancel_scroll_anim()
+            idx = self._values.index(val)
+            if animate:
+                if changed:
+                    self._defer_on_change = True
+                self._scroll_to_index(idx, animate=True)
+            else:
+                self._scroll_to_index(idx, animate=False)
+        if self._on_change and changed and not (scroll and animate):
+            self._on_change(val)
+
+
+# ---------------------------------------------------------------------------
+
 
 
 class StatCard(GlowPanel):
@@ -1014,112 +1327,298 @@ class SensorsRefs:
 
 def build_study_screen() -> Screen:
     screen = Screen(name="study")
-    root = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(10))
+    root = FloatLayout()
 
     with root.canvas.before:
         Color(*Theme.BG)
         root._bg_rect = Rectangle(pos=root.pos, size=root.size)
+    root._grid_group = InstructionGroup()
+    root.canvas.before.add(root._grid_group)
 
-    def sync_root_bg(*_):
+    def _sync_bg(*_):
         root._bg_rect.pos = root.pos
         root._bg_rect.size = root.size
+        root._grid_group.clear()
+        step = dp(48)
+        x0, y0 = root.pos
+        w, h = root.size
+        root._grid_group.add(Color(0.15, 0.92, 1.0, 0.04))
+        x = x0
+        while x <= x0 + w:
+            root._grid_group.add(Line(points=[x, y0, x, y0 + h], width=1))
+            x += step
+        y = y0
+        while y <= y0 + h:
+            root._grid_group.add(Line(points=[x0, y, x0 + w, y], width=1))
+            y += step
 
-    root.bind(pos=sync_root_bg, size=sync_root_bg)
+    root.bind(pos=_sync_bg, size=_sync_bg)
 
-    header = Label(
-        text="Study",
-        font_size=Theme.TITLE,
+    content = BoxLayout(
+        orientation="vertical",
+        padding=STUDY_PAD,
+        spacing=STUDY_GRID_GAP,
+        size_hint=(1, 1),
+    )
+
+    header_row = BoxLayout(size_hint_y=None, height=STUDY_HEADER_H, spacing=dp(12))
+    title = Label(
+        text="STUDY",
+        font_size=STUDY_TITLE,
         bold=True,
         color=Theme.ACCENT_SOFT,
-        size_hint_y=None,
-        height=dp(40),
         halign="left",
+        valign="middle",
+        size_hint_x=1,
     )
-    header.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
-    root.add_widget(header)
+    title.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+    header_row.add_widget(title)
 
-    card = GlowPanel(orientation="vertical", padding=dp(16), spacing=dp(12), size_hint_y=1)
-    q_label = Label(text="", font_size=Theme.BODY, color=Theme.TEXT, halign="left", valign="top")
-    q_label.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width - dp(8), None)))
+    tile_grid = GridLayout(cols=3, spacing=STUDY_GRID_GAP, size_hint_y=1)
 
-    feedback = Label(text="", font_size=Theme.CAPTION, color=Theme.MUTED, halign="left")
-    feedback.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+    class TimerCtrl:
+        remaining_seconds: int = 0
+        alarm_active: bool = False
+        tick_ev = None
+        alarm_ev = None
 
-    grid = GridLayout(cols=1, spacing=dp(8), size_hint_y=None)
-    grid.bind(minimum_height=grid.setter("height"))
-    option_buttons: list[Button] = []
+    ctrl = TimerCtrl()
+    timer_tile: StudyTile | None = None
+    timer_popup: Popup | None = None
+    hour_picker: WheelPickerColumn | None = None
+    minute_picker: WheelPickerColumn | None = None
+    _alarm_proc: subprocess.Popen | None = None
 
-    class StudyCtrl:
-        idx = 0
-        selected: int | None = None
+    def _stop_alarm_player() -> None:
+        nonlocal _alarm_proc
+        if _alarm_proc is None:
+            return
+        if _alarm_proc.poll() is None:
+            _alarm_proc.terminate()
+            try:
+                _alarm_proc.wait(timeout=0.4)
+            except subprocess.TimeoutExpired:
+                _alarm_proc.kill()
+        _alarm_proc = None
 
-    ctrl = StudyCtrl()
+    def _spawn_alarm_player() -> bool:
+        nonlocal _alarm_proc
+        _stop_alarm_player()
+        if not _STUDY_TONE_PATH.is_file():
+            return False
+        path = str(_STUDY_TONE_PATH)
+        candidates = [
+            ["mpg123", "-q", "--loop", "-1", path],
+            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-loop", "0", path],
+            ["mpv", "--no-video", "--really-quiet", "--loop=inf", path],
+            ["paplay", path],
+            ["cvlc", "-I", "dummy", "--loop", path],
+        ]
+        for cmd in candidates:
+            try:
+                _alarm_proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
+            except (FileNotFoundError, OSError):
+                continue
+        return False
 
-    def load_item():
-        ctrl.selected = None
-        item = STUDY_MCQ[ctrl.idx % len(STUDY_MCQ)]
-        q_label.text = str(item["q"])
-        opts = list(item["options"])
-        feedback.text = ""
-        grid.clear_widgets()
-        option_buttons.clear()
-        for i, opt in enumerate(opts):
-            btn = Button(
-                text=opt,
-                size_hint_y=None,
-                height=dp(44),
-                background_normal="",
-                background_color=Theme.PANEL_HI,
-                color=Theme.TEXT,
-                font_size=Theme.CAPTION,
+    def _begin_alarm_audio(_dt: float) -> None:
+        if not ctrl.alarm_active:
+            return
+        _spawn_alarm_player()
+
+    def _stop_alarm() -> None:
+        ctrl.alarm_active = False
+        if ctrl.alarm_ev is not None:
+            ctrl.alarm_ev.cancel()
+            ctrl.alarm_ev = None
+        _stop_alarm_player()
+
+    def _refresh_timer_tile() -> None:
+        if timer_tile is None:
+            return
+        if ctrl.alarm_active:
+            timer_tile.set_alarm_mode(True)
+            return
+        timer_tile.set_alarm_mode(False)
+        if ctrl.remaining_seconds > 0:
+            timer_tile.set_caption(_format_timer_seconds(ctrl.remaining_seconds), accent=Theme.CYAN)
+        else:
+            timer_tile.set_caption(timer_tile._base_label, accent=Theme.ACCENT_SOFT)
+
+    def _cancel_tick() -> None:
+        if ctrl.tick_ev is not None:
+            ctrl.tick_ev.cancel()
+            ctrl.tick_ev = None
+
+    def _clear_timer(*, stop_alarm: bool = True) -> None:
+        _cancel_tick()
+        ctrl.remaining_seconds = 0
+        if stop_alarm:
+            _stop_alarm()
+        _refresh_timer_tile()
+
+    def _start_alarm() -> None:
+        ctrl.alarm_active = True
+        ctrl.remaining_seconds = 0
+        _cancel_tick()
+        _refresh_timer_tile()
+        Clock.schedule_once(_begin_alarm_audio, 0)
+
+        def _pulse(_dt: float) -> None:
+            if not ctrl.alarm_active or timer_tile is None:
+                return
+            t = timer_tile.caption.color[3]
+            timer_tile.caption.color = (
+                Theme.WARN[0],
+                Theme.WARN[1],
+                Theme.WARN[2],
+                0.45 if t > 0.7 else 1.0,
             )
 
-            def mk_handler(ii: int):
-                def _pick(*_a):
-                    ctrl.selected = ii
-                    for j, b in enumerate(option_buttons):
-                        b.background_color = Theme.CYAN if j == ii else Theme.PANEL_HI
-                        b.color = Theme.BLACK if j == ii else Theme.TEXT
+        if ctrl.alarm_ev is not None:
+            ctrl.alarm_ev.cancel()
+        ctrl.alarm_ev = Clock.schedule_interval(_pulse, 0.55)
 
-                return _pick
-
-            btn.bind(on_press=mk_handler(i))
-            grid.add_widget(btn)
-            option_buttons.append(btn)
-
-    def check_answer(*_):
-        item = STUDY_MCQ[ctrl.idx % len(STUDY_MCQ)]
-        cor = int(item["correct"])
-        if ctrl.selected is None:
-            feedback.text = "Pick an answer first."
-            feedback.color = Theme.WARN
+    def _on_timer_tick(_dt: float) -> None:
+        if ctrl.alarm_active or ctrl.remaining_seconds <= 0:
             return
-        if ctrl.selected == cor:
-            feedback.text = "Correct — " + str(item["explain"])
-            feedback.color = Theme.OK
+        ctrl.remaining_seconds -= 1
+        if ctrl.remaining_seconds <= 0:
+            _start_alarm()
         else:
-            feedback.text = "Not quite — " + str(item["explain"])
-            feedback.color = Theme.DANGER
+            _refresh_timer_tile()
 
-    def next_q(*_):
-        ctrl.idx += 1
-        load_item()
+    def _apply_timer_duration(total_seconds: int) -> None:
+        total_seconds = max(0, int(total_seconds))
+        _stop_alarm()
+        if total_seconds <= 0:
+            _clear_timer(stop_alarm=False)
+            return
+        ctrl.remaining_seconds = total_seconds
+        _cancel_tick()
+        ctrl.tick_ev = Clock.schedule_interval(_on_timer_tick, 1.0)
+        _refresh_timer_tile()
 
-    card.add_widget(q_label)
-    card.add_widget(feedback)
-    scroll_opts = ScrollView(do_scroll_x=False, size_hint_y=1, bar_width=dp(4))
-    scroll_opts.add_widget(grid)
-    card.add_widget(scroll_opts)
+    def _silence_from_tile() -> None:
+        _stop_alarm()
+        _refresh_timer_tile()
 
-    actions = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(10))
-    actions.add_widget(make_button("Check", check_answer, accent=False, width=dp(120)))
-    actions.add_widget(make_button("Next", next_q, accent=True, width=dp(120)))
-    card.add_widget(actions)
+    def _open_timer_popup() -> None:
+        nonlocal timer_popup, hour_picker, minute_picker
+        if ctrl.alarm_active:
+            return
+        if timer_popup is not None and timer_popup.parent is not None:
+            return
 
-    root.add_widget(card)
+        if ctrl.remaining_seconds > 0:
+            h, rem = divmod(ctrl.remaining_seconds, 3600)
+            m, _s = divmod(rem, 60)
+        else:
+            h, m = 0, 25
 
-    load_item()
+        panel = GlowPanel(orientation="vertical", padding=dp(16), spacing=dp(12))
+        panel.add_widget(
+            Label(
+                text="Set study timer",
+                font_size=Theme.BODY,
+                bold=True,
+                color=Theme.TEXT,
+                size_hint_y=None,
+                height=dp(28),
+            )
+        )
+
+        wheels = BoxLayout(spacing=dp(16), size_hint_y=1)
+        hour_picker = WheelPickerColumn(
+            "HOURS",
+            list(range(24)),
+            initial=h,
+            size_hint_x=0.5,
+        )
+        minute_picker = WheelPickerColumn(
+            "MINUTES",
+            list(range(60)),
+            initial=m,
+            size_hint_x=0.5,
+        )
+        wheels.size_hint_y = None
+        wheels.height = STUDY_WHEEL_ROW_H * STUDY_WHEEL_VISIBLE_ROWS + dp(30)
+        wheels.add_widget(hour_picker)
+        wheels.add_widget(minute_picker)
+        panel.add_widget(wheels)
+
+        actions = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(10))
+
+        def _close_popup(*_a):
+            if timer_popup is not None:
+                timer_popup.dismiss()
+
+        def _set_timer(*_a):
+            total = hour_picker.value * 3600 + minute_picker.value * 60
+            if total <= 0:
+                return
+            _apply_timer_duration(total)
+            _close_popup()
+
+        def _cancel_timer(*_a):
+            _clear_timer()
+            _close_popup()
+
+        actions.add_widget(make_button("Close", _close_popup, width=dp(100)))
+        if ctrl.remaining_seconds > 0:
+            actions.add_widget(make_button("Cancel Timer", _cancel_timer, width=dp(140)))
+        actions.add_widget(make_button("Set Timer", _set_timer, accent=True, width=dp(120)))
+        panel.add_widget(actions)
+
+        timer_popup = Popup(
+            title="",
+            content=panel,
+            size_hint=(0.78, 0.62),
+            auto_dismiss=False,
+            separator_height=0,
+            background="",
+            background_color=Theme.PANEL,
+        )
+        timer_popup.open()
+
+    def _on_timer_tile_tap() -> None:
+        if ctrl.alarm_active:
+            _silence_from_tile()
+            return
+        _open_timer_popup()
+
+    tile_defs: list[tuple[str, str, Callable[[], None] | None]] = [
+        ("question.png", "ASK FROM BUNNY", None),
+        ("timer.png", "STUDY TIMER", _on_timer_tile_tap),
+        ("open-book.png", "SUMMARIZE NOTES", None),
+        ("to-do.png", "TO-DO LIST", None),
+        ("ballot.png", "GENERATE MCQ", None),
+        ("speech-to-text.png", "GENERATE QUIZ\n(VOICE QUIZ)", None),
+    ]
+
+    for icon_file, label, handler in tile_defs:
+        tile = StudyTile(icon_file, label, on_tap=handler, size_hint_y=1)
+        if icon_file == "timer.png":
+            timer_tile = tile
+        tile_grid.add_widget(tile)
+
+    content.add_widget(header_row)
+    content.add_widget(tile_grid)
+    root.add_widget(content)
     screen.add_widget(root)
+
+    def _on_enter(*_args):
+        _refresh_timer_tile()
+
+    screen.bind(on_enter=_on_enter)
+
+    _refresh_timer_tile()
+    Clock.schedule_once(_sync_bg, 0)
     return screen
 
 

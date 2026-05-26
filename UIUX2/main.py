@@ -84,6 +84,8 @@ _SWIPE_NEXT = {
     "sensors": "controls",
 }
 
+IDLE_FACE_TIMEOUT_S = 120.0
+
 
 class FourScreenSwipeManager(ScreenManager):
     """Horizontal swipe matching UIUX watch flow: Study—Face—Sensors—Controls (no chrome)."""
@@ -91,27 +93,43 @@ class FourScreenSwipeManager(ScreenManager):
     def __init__(self, **kw):
         super().__init__(**kw)
         self.threshold_px = dp(24)
-        self._touch_x: float | None = None
+        self._swipe_origin: tuple[float, float] | None = None
+        self._swipe_touch = None
 
     def on_touch_down(self, touch):
+        if super().on_touch_down(touch):
+            return True
         if self.collide_point(*touch.pos):
-            self._touch_x = touch.x
-        return super().on_touch_down(touch)
+            self._swipe_origin = (touch.x, touch.y)
+            self._swipe_touch = touch
+        return False
 
     def _navigate_to(self, target: str | None, *, direction: str) -> None:
         if target and target != self.current:
             self.transition.direction = direction
             self.current = target
 
+    def _clear_swipe(self, touch) -> None:
+        if self._swipe_touch is touch:
+            self._swipe_origin = None
+            self._swipe_touch = None
+
     def on_touch_up(self, touch):
-        if self._touch_x is not None:
-            dx = touch.x - self._touch_x
-            cur = self.current
-            if dx <= -self.threshold_px:
-                self._navigate_to(_SWIPE_NEXT.get(cur), direction="left")
-            elif dx >= self.threshold_px:
-                self._navigate_to(_SWIPE_PREV.get(cur), direction="right")
-            self._touch_x = None
+        if (
+            self._swipe_origin is not None
+            and self._swipe_touch is touch
+            and touch.grab_current is None
+        ):
+            x0, y0 = self._swipe_origin
+            dx = touch.x - x0
+            dy = touch.y - y0
+            if abs(dx) >= self.threshold_px and abs(dx) > abs(dy):
+                cur = self.current
+                if dx < 0:
+                    self._navigate_to(_SWIPE_NEXT.get(cur), direction="left")
+                else:
+                    self._navigate_to(_SWIPE_PREV.get(cur), direction="right")
+        self._clear_swipe(touch)
         return super().on_touch_up(touch)
 
 
@@ -142,6 +160,14 @@ class UniMateKivyUI(BoxLayout):
         Clock.schedule_interval(lambda *_: self._tick_state(), 2.5)
         schedule_random_idle_charm(self.eyes_widget, interval=9.0)
         Window.bind(on_key_down=self._on_key_down)
+        Window.bind(
+            on_touch_down=self._on_user_activity,
+            on_touch_up=self._on_user_activity,
+            on_touch_move=self._on_user_activity,
+        )
+
+        self._idle_ev = None
+        self._reset_idle_timer()
 
         self.manager.current = "face"
         self._on_screen_changed()
@@ -182,6 +208,25 @@ class UniMateKivyUI(BoxLayout):
         else:
             self.eyes_widget.stop()
 
+    def _on_user_activity(self, *_args) -> bool:
+        self._reset_idle_timer()
+        return False
+
+    def _reset_idle_timer(self) -> None:
+        if self._idle_ev is not None:
+            self._idle_ev.cancel()
+        self._idle_ev = Clock.schedule_once(self._on_idle_timeout, IDLE_FACE_TIMEOUT_S)
+
+    def _on_idle_timeout(self, _dt: float) -> None:
+        self._idle_ev = None
+        if self.manager.current != "face":
+            order = list(SCREEN_ORDER)
+            cur_i = order.index(self.manager.current)
+            face_i = order.index("face")
+            self.manager.transition.direction = "right" if cur_i > face_i else "left"
+            self.manager.current = "face"
+        self._reset_idle_timer()
+
     def _move_screen_delta(self, delta: int) -> None:
         order = list(SCREEN_ORDER)
         i = max(0, order.index(self.manager.current))
@@ -190,6 +235,7 @@ class UniMateKivyUI(BoxLayout):
         self.manager.current = order[ni]
 
     def _on_key_down(self, _window, key, *_args):
+        self._reset_idle_timer()
         if key == 275:
             self._move_screen_delta(1)
             return True
