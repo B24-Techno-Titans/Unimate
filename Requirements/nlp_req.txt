@@ -1,7 +1,10 @@
 Adafruit-Blinka==8.67.0
 adafruit-circuitpython-busdevice==5.2.14
 adafruit-circuitpython-connectionmanager==3.1.6
+adafruit-circuitpython-motor==3.4.20
+adafruit-circuitpython-pca9685==3.4.22
 adafruit-circuitpython-pixelbuf==2.0.10
+adafruit-circuitpython-register==1.11.3
 adafruit-circuitpython-requests==4.1.15
 adafruit-circuitpython-typing==1.12.3
 Adafruit-PlatformDetect==3.84.1
@@ -40,6 +43,7 @@ dill==0.4.0
 distro==1.9.0
 docutils==0.21.2
 filelock==3.20.3
+filetype==1.2.0
 Flask==3.1.1
 flatbuffers==25.12.19
 fqdn==1.5.1
@@ -71,6 +75,8 @@ jsonpatch==1.32
 jsonpointer==2.4
 jsonschema==4.19.2
 jsonschema-specifications==2023.12.1
+Kivy==2.3.1
+Kivy-Garden==0.1.5
 lgpio==0.2.2.0
 libarchive-c==5.1
 libevdev==0.11

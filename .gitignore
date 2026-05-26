@@ -51,7 +51,7 @@ coverage.xml
 .pytest_cache/
 cover/
 #Exclude eyes animation frames
-CV/Robo/*_frames*
+*frame*
 #Ignore large file
 NLP/sherpa-onnx-whisper-tiny.en/*
 
