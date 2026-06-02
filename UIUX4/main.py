@@ -41,6 +41,8 @@ if _WINDOWED:
     Config.set("graphics", "resizable", "1")
     Config.set("graphics", "width", "1024")
     Config.set("graphics", "height", "600")
+    Config.set("graphics", "minimum_width", "800")
+    Config.set("graphics", "minimum_height", "480")
 else:
     Config.set("graphics", "fullscreen", "auto")
     Config.set("graphics", "borderless", "1")
@@ -69,6 +71,35 @@ from dashboard import (  # noqa: E402
 from mock_state import MockState  # noqa: E402
 from robo_eyes import RoboEyesWidget, schedule_random_idle_charm  # noqa: E402
 from theme import Theme  # noqa: E402
+
+
+def _silence_probesysfs_xinput_warnings() -> None:
+    """ProbeSysfs runs xinput on Xwayland; warnings are harmless but very noisy."""
+    try:
+        import subprocess
+
+        from kivy.input.providers import probesysfs
+
+        _orig_getout = probesysfs.getout
+
+        def _getout(*args):
+            if args and args[0] == "xinput":
+                try:
+                    return subprocess.Popen(
+                        args,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                    ).communicate()[0]
+                except OSError:
+                    return b""
+            return _orig_getout(*args)
+
+        probesysfs.getout = _getout
+    except ImportError:
+        pass
+
+
+_silence_probesysfs_xinput_warnings()
 
 SCREEN_ORDER = ("study", "face", "sensors", "controls")
 
@@ -253,8 +284,6 @@ class UniMateApp(App):
 
     def build(self):
         Window.clearcolor = Theme.BG
-        Window.minimum_width = int(dp(800))
-        Window.minimum_height = int(dp(480))
         if _WINDOWED:
             Window.fullscreen = False
         return UniMateKivyUI()

@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 import random
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,14 +24,26 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.image import Image
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
+from kivy.uix.relativelayout import RelativeLayout
 from kivy.uix.screenmanager import Screen
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.slider import Slider
 from kivy.uix.widget import Widget
 
 from mock_state import MockState
+from nlp_functions import (
+    AskBunnyHandlers,
+    CAPTION_AUDIO_LAG_S,
+    caption_target_index,
+    cleanup_wav,
+    format_mmss,
+    run_ask_bunny_session,
+    stop_playback,
+    words_window,
+)
 from theme import Theme
 
 _ICONS_DIR = Path(__file__).resolve().parent / "icons"
@@ -215,6 +229,14 @@ STUDY_GRID_GAP = dp(12)
 STUDY_TILE_LABEL = sp(15)
 STUDY_TILE_ICON = dp(108)
 STUDY_TITLE = sp(40)
+STUDY_ASK_POPUP_TITLE = sp(38)
+STUDY_ASK_ICON_ROW_H = dp(150)
+STUDY_ASK_DOTS_H = dp(56)
+STUDY_ASK_DOT_SPACING = dp(40)
+STUDY_ASK_POPUP_SIZE = (0.92, 0.86)
+STUDY_ASK_POPUP_PAD = (dp(40), dp(36), dp(40), dp(36))
+STUDY_RESPOND_CAPTION_H = dp(120)
+STUDY_RESPOND_PROGRESS_H = dp(32)
 STUDY_WHEEL_ROW_H = dp(44)
 STUDY_WHEEL_VISIBLE_ROWS = 5
 STUDY_WHEEL_SCROLL_ANIM_S = 0.22
@@ -318,6 +340,180 @@ class StudyTileIcon(Widget):
         with self.canvas:
             Color(1, 1, 1, 1)
             Rectangle(texture=self._texture, pos=(ix, iy), size=(side, side))
+
+
+class AskBunnyIconRow(BoxLayout):
+    """Bunny + question icons for the Ask From Bunny popup."""
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            orientation="horizontal",
+            spacing=-dp(400),
+            padding=(0, 0),
+            **kwargs,
+        )
+        for icon_file, weight in (("animal.png", 0.54), ("question.png", 0.46)):
+            img = Image(
+                texture=_study_icon_texture(icon_file),
+                fit_mode="contain",
+                size_hint_x=weight,
+            )
+            self.add_widget(img)
+
+
+class RespondBunnyIconRow(BoxLayout):
+    """Bunny + response icons for the Responding popup."""
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            orientation="horizontal",
+            spacing=-dp(400),
+            padding=(0, 0),
+            **kwargs,
+        )
+        for icon_file, weight in (("animal.png", 0.54), ("response.png", 0.46)):
+            img = Image(
+                texture=_study_icon_texture(icon_file),
+                fit_mode="contain",
+                size_hint_x=weight,
+            )
+            self.add_widget(img)
+
+
+class RespondingCaptionBox(BoxLayout):
+    """Inner cyan frame — shows a sliding window of spoken words (combined.py answer)."""
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            orientation="vertical",
+            padding=(dp(14), dp(12)),
+            size_hint_y=None,
+            height=STUDY_RESPOND_CAPTION_H,
+            **kwargs,
+        )
+        self.caption = Label(
+            text="",
+            font_size=sp(22),
+            color=Theme.ACCENT_SOFT,
+            halign="center",
+            valign="middle",
+        )
+        self.caption.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+        self.add_widget(self.caption)
+        with self.canvas.before:
+            Color(*Theme.BORDER_CYAN_SOFT)
+            self._border = Line(
+                rounded_rectangle=(self.x, self.y, self.width, self.height, dp(14)),
+                width=dp(1.4),
+            )
+        self.bind(pos=self._sync_border, size=self._sync_border)
+
+    def _sync_border(self, *_args) -> None:
+        self._border.rounded_rectangle = (
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            dp(14),
+        )
+
+
+class SpeechProgressRow(BoxLayout):
+    """Playback progress bar and elapsed / total timestamps."""
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            orientation="horizontal",
+            spacing=dp(10),
+            size_hint_y=None,
+            height=STUDY_RESPOND_PROGRESS_H,
+            **kwargs,
+        )
+        self._track = Widget(size_hint_x=1)
+        self._time_lbl = Label(
+            text="0:00 / 0:00",
+            font_size=sp(14),
+            color=Theme.CYAN_DIM,
+            halign="right",
+            valign="middle",
+            size_hint_x=None,
+            width=dp(88),
+        )
+        self._progress = 0.0
+        self.add_widget(self._track)
+        self.add_widget(self._time_lbl)
+        self._track.bind(pos=self._draw, size=self._draw)
+
+    def set_progress(self, elapsed: float, duration: float) -> None:
+        duration = max(duration, 0.01)
+        self._progress = min(1.0, max(0.0, elapsed / duration))
+        self._time_lbl.text = f"{format_mmss(elapsed)} / {format_mmss(duration)}"
+        self._draw()
+
+    def _draw(self, *_args) -> None:
+        self._track.canvas.clear()
+        if self._track.width < 4:
+            return
+        x, y, w, h = self._track.x, self._track.y, self._track.width, self._track.height
+        cy = y + h / 2
+        with self._track.canvas:
+            Color(Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], 0.2)
+            Line(points=[x, cy, x + w, cy], width=dp(2))
+            if self._progress > 0:
+                Color(*Theme.ACCENT_SOFT)
+                Line(points=[x, cy, x + w * self._progress, cy], width=dp(3))
+
+
+class GlowingDotsRow(Widget):
+    """Sequential pulsing cyan dots below the Ask From Bunny title."""
+
+    DOT_COUNT = 4
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._phase = 0.0
+        self._pulse_ev = None
+        self.bind(pos=self._draw, size=self._draw)
+
+    def on_parent(self, widget, parent):
+        if parent is not None and self._pulse_ev is None:
+            self._pulse_ev = Clock.schedule_interval(self._tick, 1 / 30.0)
+        elif parent is None and self._pulse_ev is not None:
+            self._pulse_ev.cancel()
+            self._pulse_ev = None
+
+    def _tick(self, dt: float) -> None:
+        self._phase += dt * 2.2
+        self._draw()
+
+    def _draw(self, *_args) -> None:
+        self.canvas.clear()
+        if self.width < 4 or self.height < 4:
+            return
+        # Canvas instructions use parent coordinates (see StudyTileIcon).
+        n = self.DOT_COUNT
+        spacing = STUDY_ASK_DOT_SPACING * 0.82
+        mid = (n - 1) / 2.0
+        cx_mid = self.center_x
+        cy = self.center_y
+        dot_r = min(dp(7), self.height * 0.14)
+        glow_r_extra = sp(2)
+        for i in range(n):
+            cx = cx_mid + (i - mid) * spacing
+            cycle = (self._phase - i * 0.42) % n
+            pulse = max(0.0, 1.0 - abs(cycle) * 1.5)
+            glow_a = 0.015 + 0.16 * pulse
+            core_a = 0.12 + 0.42 * pulse
+            with self.canvas:
+                for mult, alpha in ((2.6, glow_a * 0.3), (1.85, glow_a * 0.55), (1.35, glow_a)):
+                    glow_r = dot_r * mult + glow_r_extra
+                    Color(Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], alpha)
+                    Ellipse(
+                        pos=(cx - glow_r, cy - glow_r),
+                        size=(glow_r * 2, glow_r * 2),
+                    )
+                Color(Theme.ACCENT_SOFT[0], Theme.ACCENT_SOFT[1], Theme.ACCENT_SOFT[2], core_a)
+                Ellipse(pos=(cx - dot_r, cy - dot_r), size=(dot_r * 2, dot_r * 2))
 
 
 class StudyTile(GlowPanel):
@@ -1385,6 +1581,20 @@ def build_study_screen() -> Screen:
     ctrl = TimerCtrl()
     timer_tile: StudyTile | None = None
     timer_popup: Popup | None = None
+    ask_bunny_popup: Popup | None = None
+    thinking_popup: Popup | None = None
+    responding_popup: Popup | None = None
+    ask_bunny_cancel = threading.Event()
+    ask_bunny_session_thread: threading.Thread | None = None
+    ask_bunny_aplay_proc: subprocess.Popen | None = None
+    ask_bunny_wav_path: str | None = None
+    ask_bunny_speech_tick = None
+    ask_bunny_speech_start = 0.0
+    ask_bunny_speech_duration = 0.0
+    ask_bunny_speech_words: list[str] = []
+    ask_bunny_caption_last_idx = -1
+    responding_caption_box: RespondingCaptionBox | None = None
+    responding_progress_row: SpeechProgressRow | None = None
     hour_picker: WheelPickerColumn | None = None
     minute_picker: WheelPickerColumn | None = None
     _alarm_proc: subprocess.Popen | None = None
@@ -1586,14 +1796,467 @@ def build_study_screen() -> Screen:
         )
         timer_popup.open()
 
+    def _run_on_main(fn: Callable[[], None]) -> None:
+        Clock.schedule_once(lambda _dt: fn(), 0)
+
+    def _stop_ask_bunny_speech_tick() -> None:
+        nonlocal ask_bunny_speech_tick
+        if ask_bunny_speech_tick is not None:
+            ask_bunny_speech_tick.cancel()
+            ask_bunny_speech_tick = None
+
+    def _cancel_ask_bunny_session() -> None:
+        nonlocal ask_bunny_aplay_proc, ask_bunny_wav_path
+        ask_bunny_cancel.set()
+        stop_playback(ask_bunny_aplay_proc)
+        ask_bunny_aplay_proc = None
+        cleanup_wav(ask_bunny_wav_path)
+        ask_bunny_wav_path = None
+        _stop_ask_bunny_speech_tick()
+
+    def _dismiss_ask_bunny_popups() -> None:
+        if ask_bunny_popup is not None and ask_bunny_popup.parent is not None:
+            ask_bunny_popup.dismiss()
+        if thinking_popup is not None and thinking_popup.parent is not None:
+            thinking_popup.dismiss()
+        if responding_popup is not None and responding_popup.parent is not None:
+            responding_popup.dismiss()
+
+    def _close_thinking_popup() -> None:
+        if thinking_popup is not None and thinking_popup.parent is not None:
+            thinking_popup.dismiss()
+
+    def _close_responding_popup() -> None:
+        if responding_popup is not None and responding_popup.parent is not None:
+            responding_popup.dismiss()
+
+    def _reset_ask_bunny_session() -> None:
+        nonlocal ask_bunny_aplay_proc, ask_bunny_wav_path, ask_bunny_caption_last_idx
+        ask_bunny_caption_last_idx = -1
+        _stop_ask_bunny_speech_tick()
+        stop_playback(ask_bunny_aplay_proc)
+        ask_bunny_aplay_proc = None
+        cleanup_wav(ask_bunny_wav_path)
+        ask_bunny_wav_path = None
+        ask_bunny_cancel.clear()
+
+    def _on_speech_tick(_dt: float) -> None:
+        nonlocal ask_bunny_caption_last_idx
+        if responding_caption_box is None or responding_progress_row is None:
+            return
+        elapsed = time.monotonic() - ask_bunny_speech_start
+        words = ask_bunny_speech_words
+        if words and ask_bunny_speech_duration > 0 and responding_caption_box.caption is not None:
+            idx = caption_target_index(elapsed, ask_bunny_speech_duration, len(words), CAPTION_AUDIO_LAG_S)
+            if idx >= 0 and idx != ask_bunny_caption_last_idx:
+                ask_bunny_caption_last_idx = idx
+                responding_caption_box.caption.text = words_window(words, idx)
+        responding_progress_row.set_progress(elapsed, ask_bunny_speech_duration)
+        playback_done = ask_bunny_aplay_proc is not None and ask_bunny_aplay_proc.poll() is not None
+        if playback_done or elapsed >= ask_bunny_speech_duration:
+            _stop_ask_bunny_speech_tick()
+            _close_responding_popup()
+            _reset_ask_bunny_session()
+
+    def _open_thinking_popup() -> None:
+        nonlocal thinking_popup
+        if thinking_popup is not None and thinking_popup.parent is not None:
+            return
+
+        panel = GlowPanel(
+            orientation="vertical",
+            padding=STUDY_ASK_POPUP_PAD,
+            spacing=dp(8),
+            size_hint=(1, 1),
+        )
+
+        top_bar = BoxLayout(size_hint_y=None, height=dp(40))
+        top_bar.add_widget(Widget())
+        close_btn = Button(
+            text="×",
+            size_hint=(None, None),
+            width=dp(40),
+            height=dp(40),
+            font_size=sp(28),
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            background_normal="",
+            background_down="",
+            background_color=(0, 0, 0, 0),
+        )
+        top_bar.add_widget(close_btn)
+        panel.add_widget(top_bar)
+
+        stack_h = STUDY_ASK_ICON_ROW_H + dp(50) + STUDY_ASK_DOTS_H + 2 * dp(12)
+        body = FloatLayout(size_hint=(1, 1))
+        stack = BoxLayout(
+            orientation="vertical",
+            spacing=dp(12),
+            size_hint=(0.88, None),
+            height=stack_h,
+            pos_hint={"center_x": 0.5, "top": 0.92},
+        )
+        icon_holder = RelativeLayout(size_hint=(1, None), height=STUDY_ASK_ICON_ROW_H)
+        icon_holder.add_widget(
+            RespondBunnyIconRow(
+                size_hint=(1, None),
+                height=STUDY_ASK_ICON_ROW_H,
+                pos=(0, sp(8)),
+            )
+        )
+        stack.add_widget(icon_holder)
+        title_lbl = Label(
+            text="THINKING",
+            font_size=STUDY_ASK_POPUP_TITLE,
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            halign="center",
+            valign="middle",
+            size_hint_y=None,
+            height=dp(50),
+        )
+        title_lbl.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+        stack.add_widget(title_lbl)
+
+        thinking_row = BoxLayout(
+            orientation="horizontal",
+            spacing=dp(10),
+            size_hint=(None, None),
+            width=dp(270),
+            height=STUDY_ASK_DOTS_H,
+            pos_hint={"center_x": 0.5},
+        )
+        thinking_row.add_widget(
+            Label(
+                text="Thinking",
+                font_size=sp(24),
+                bold=True,
+                color=Theme.ACCENT_SOFT,
+                halign="right",
+                valign="middle",
+                size_hint=(None, 1),
+                width=dp(110),
+            )
+        )
+        thinking_row.add_widget(GlowingDotsRow(size_hint=(None, 1), width=dp(150)))
+        stack.add_widget(thinking_row)
+        body.add_widget(stack)
+        panel.add_widget(body)
+
+        thinking_popup = Popup(
+            title="",
+            content=panel,
+            size_hint=STUDY_ASK_POPUP_SIZE,
+            auto_dismiss=False,
+            separator_height=0,
+            background="",
+            background_color=Theme.PANEL,
+        )
+
+        def _close_thinking(*_a) -> None:
+            _cancel_ask_bunny_session()
+            _dismiss_ask_bunny_popups()
+            _reset_ask_bunny_session()
+
+        close_btn.bind(on_press=_close_thinking)
+        thinking_popup.open()
+
+    def _open_responding_popup(initial_text: str = "") -> None:
+        nonlocal responding_popup, responding_caption_box, responding_progress_row
+        if responding_popup is not None and responding_popup.parent is not None:
+            if responding_caption_box is not None and initial_text:
+                responding_caption_box.caption.text = initial_text
+            return
+
+        panel = GlowPanel(
+            orientation="vertical",
+            padding=STUDY_ASK_POPUP_PAD,
+            spacing=dp(8),
+            size_hint=(1, 1),
+        )
+
+        top_bar = BoxLayout(size_hint_y=None, height=dp(40))
+        top_bar.add_widget(Widget())
+        close_btn = Button(
+            text="×",
+            size_hint=(None, None),
+            width=dp(40),
+            height=dp(40),
+            font_size=sp(28),
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            background_normal="",
+            background_down="",
+            background_color=(0, 0, 0, 0),
+        )
+        top_bar.add_widget(close_btn)
+        panel.add_widget(top_bar)
+
+        stack_h = (
+            STUDY_ASK_ICON_ROW_H
+            + dp(50)
+            + STUDY_RESPOND_CAPTION_H
+            + STUDY_RESPOND_PROGRESS_H
+            + 3 * dp(12)
+        )
+        body = FloatLayout(size_hint=(1, 1))
+        stack = BoxLayout(
+            orientation="vertical",
+            spacing=dp(12),
+            size_hint=(0.88, None),
+            height=stack_h,
+            pos_hint={"center_x": 0.5, "top": 0.92},
+        )
+        icon_holder = RelativeLayout(size_hint=(1, None), height=STUDY_ASK_ICON_ROW_H)
+        icon_holder.add_widget(
+            RespondBunnyIconRow(
+                size_hint=(1, None),
+                height=STUDY_ASK_ICON_ROW_H,
+                pos=(0, sp(8)),
+            )
+        )
+        stack.add_widget(icon_holder)
+        title_lbl = Label(
+            text="RESPONDING",
+            font_size=STUDY_ASK_POPUP_TITLE,
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            halign="center",
+            valign="middle",
+            size_hint_y=None,
+            height=dp(50),
+        )
+        title_lbl.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+        stack.add_widget(title_lbl)
+
+        responding_caption_box = RespondingCaptionBox()
+        responding_caption_box.caption.text = initial_text
+        stack.add_widget(responding_caption_box)
+
+        responding_progress_row = SpeechProgressRow(
+            size_hint_x=1,
+            pos_hint={"center_x": 0.5},
+        )
+        responding_progress_row.set_progress(0.0, 1.0)
+        stack.add_widget(responding_progress_row)
+        body.add_widget(stack)
+        panel.add_widget(body)
+
+        responding_popup = Popup(
+            title="",
+            content=panel,
+            size_hint=STUDY_ASK_POPUP_SIZE,
+            auto_dismiss=False,
+            separator_height=0,
+            background="",
+            background_color=Theme.PANEL,
+        )
+
+        def _close_responding(*_a) -> None:
+            _cancel_ask_bunny_session()
+            _dismiss_ask_bunny_popups()
+            _reset_ask_bunny_session()
+
+        close_btn.bind(on_press=_close_responding)
+        responding_popup.open()
+
+    def _start_ask_bunny_session() -> None:
+        nonlocal ask_bunny_session_thread
+        nonlocal ask_bunny_aplay_proc
+        nonlocal ask_bunny_wav_path
+        nonlocal ask_bunny_speech_tick
+        nonlocal ask_bunny_speech_start
+        nonlocal ask_bunny_speech_duration
+        nonlocal ask_bunny_speech_words
+
+        def _on_empty_stt() -> None:
+            _dismiss_ask_bunny_popups()
+            _reset_ask_bunny_session()
+
+        def _on_stt_complete(_command: str, use_gemini: bool) -> None:
+            if ask_bunny_popup is not None and ask_bunny_popup.parent is not None:
+                ask_bunny_popup.dismiss()
+            if use_gemini:
+                _open_thinking_popup()
+
+        def _on_device_handled() -> None:
+            _dismiss_ask_bunny_popups()
+            _reset_ask_bunny_session()
+
+        def _on_answer_ready(_answer: str, words: list[str]) -> None:
+            nonlocal ask_bunny_speech_words
+            ask_bunny_speech_words = words
+            _close_thinking_popup()
+            _open_responding_popup()
+
+        def _on_speech_start(
+            duration: float,
+            words: list[str],
+            proc: subprocess.Popen | None,
+            wav_path: str | None,
+        ) -> None:
+            nonlocal ask_bunny_aplay_proc, ask_bunny_wav_path, ask_bunny_speech_tick
+            nonlocal ask_bunny_speech_start, ask_bunny_speech_duration, ask_bunny_speech_words
+            nonlocal ask_bunny_caption_last_idx
+            ask_bunny_aplay_proc = proc
+            ask_bunny_wav_path = wav_path
+            ask_bunny_speech_duration = duration
+            ask_bunny_speech_words = words
+            ask_bunny_speech_start = time.monotonic()
+            ask_bunny_caption_last_idx = -1
+            if responding_caption_box is not None:
+                responding_caption_box.caption.text = ""
+            _stop_ask_bunny_speech_tick()
+            ask_bunny_speech_tick = Clock.schedule_interval(_on_speech_tick, 1 / 30.0)
+
+        def _on_error(message: str) -> None:
+            _close_thinking_popup()
+            _open_responding_popup(message[:120])
+            Clock.schedule_once(
+                lambda _dt: (_close_responding_popup(), _reset_ask_bunny_session()),
+                3.5,
+            )
+
+        def _on_finished() -> None:
+            if ask_bunny_speech_tick is None:
+                _close_responding_popup()
+                _reset_ask_bunny_session()
+
+        handlers = AskBunnyHandlers(
+            on_empty_stt=_on_empty_stt,
+            on_stt_complete=_on_stt_complete,
+            on_device_handled=_on_device_handled,
+            on_answer_ready=_on_answer_ready,
+            on_speech_start=_on_speech_start,
+            on_error=_on_error,
+            on_finished=_on_finished,
+        )
+        ask_bunny_session_thread = run_ask_bunny_session(_run_on_main, ask_bunny_cancel, handlers)
+
+    def _open_ask_bunny_popup() -> None:
+        nonlocal ask_bunny_popup
+        if ask_bunny_popup is not None and ask_bunny_popup.parent is not None:
+            return
+
+        _reset_ask_bunny_session()
+
+        panel = GlowPanel(
+            orientation="vertical",
+            padding=STUDY_ASK_POPUP_PAD,
+            spacing=dp(8),
+            size_hint=(1, 1),
+        )
+
+        top_bar = BoxLayout(size_hint_y=None, height=dp(40))
+        top_bar.add_widget(Widget())
+        close_btn = Button(
+            text="×",
+            size_hint=(None, None),
+            width=dp(40),
+            height=dp(40),
+            font_size=sp(28),
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            background_normal="",
+            background_down="",
+            background_color=(0, 0, 0, 0),
+        )
+        top_bar.add_widget(close_btn)
+        panel.add_widget(top_bar)
+
+        stack_h = STUDY_ASK_ICON_ROW_H + dp(50) + STUDY_ASK_DOTS_H + 2 * dp(12)
+        body = FloatLayout(size_hint=(1, 1))
+        stack = BoxLayout(
+            orientation="vertical",
+            spacing=dp(12),
+            size_hint=(0.88, None),
+            height=stack_h,
+            pos_hint={"center_x": 0.5, "top": 0.92},
+        )
+        icon_holder = RelativeLayout(
+            size_hint=(1, None),
+            height=STUDY_ASK_ICON_ROW_H,
+        )
+        icon_holder.add_widget(
+            AskBunnyIconRow(
+                size_hint=(1, None),
+                height=STUDY_ASK_ICON_ROW_H,
+                pos=(0, sp(8)),
+            )
+        )
+        stack.add_widget(icon_holder)
+        title_lbl = Label(
+            text="ASK FROM BUNNY",
+            font_size=STUDY_ASK_POPUP_TITLE,
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            halign="center",
+            valign="middle",
+            size_hint_y=None,
+            height=dp(50),
+        )
+        title_lbl.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+        stack.add_widget(title_lbl)
+        listening_row = BoxLayout(
+            orientation="horizontal",
+            spacing=dp(10),
+            size_hint=(None, None),
+            width=dp(270),
+            height=STUDY_ASK_DOTS_H,
+            pos_hint={"center_x": 0.5},
+        )
+        listening_row.add_widget(
+            Label(
+                text="Listening",
+                font_size=sp(24),
+                bold=True,
+                color=Theme.ACCENT_SOFT,
+                halign="right",
+                valign="middle",
+                size_hint=(None, 1),
+                width=dp(110),
+            )
+        )
+        listening_row.add_widget(
+            GlowingDotsRow(
+                size_hint=(None, 1),
+                width=dp(150),
+            )
+        )
+        stack.add_widget(listening_row)
+        body.add_widget(stack)
+        panel.add_widget(body)
+
+        ask_bunny_popup = Popup(
+            title="",
+            content=panel,
+            size_hint=STUDY_ASK_POPUP_SIZE,
+            auto_dismiss=False,
+            separator_height=0,
+            background="",
+            background_color=Theme.PANEL,
+        )
+
+        def _close_ask_popup(*_a) -> None:
+            _cancel_ask_bunny_session()
+            _dismiss_ask_bunny_popups()
+            _reset_ask_bunny_session()
+
+        close_btn.bind(on_press=_close_ask_popup)
+        ask_bunny_popup.open()
+        _start_ask_bunny_session()
+
     def _on_timer_tile_tap() -> None:
         if ctrl.alarm_active:
             _silence_from_tile()
             return
         _open_timer_popup()
 
+    def _on_ask_bunny_tile_tap() -> None:
+        _open_ask_bunny_popup()
+
     tile_defs: list[tuple[str, str, Callable[[], None] | None]] = [
-        ("question.png", "ASK FROM BUNNY", None),
+        ("question.png", "ASK FROM BUNNY", _on_ask_bunny_tile_tap),
         ("timer.png", "STUDY TIMER", _on_timer_tile_tap),
         ("open-book.png", "SUMMARIZE NOTES", None),
         ("to-do.png", "TO-DO LIST", None),
