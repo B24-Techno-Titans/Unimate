@@ -151,6 +151,10 @@ async def startup_event():
     client_thread = threading.Thread(target=read_esp32_data, daemon=True)
     client_thread.start()
     print("ESP32 Client thread started successfully.")
+    
+    temp_loop = threading.Thread(target=temp.update_temp_loop, daemon=True)
+    temp_loop.start()
+    print("Temperature loop thread started successfully.")
 
 @app.on_event("shutdown")
 async def shutdown_event():

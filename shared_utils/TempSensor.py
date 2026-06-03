@@ -28,11 +28,11 @@ def get_humidity():
                 return 0
     except Exception as e:
         print("Read error:", e)
-    
-if __name__ == "__main__":
+
+def update_temp_loop():
     import board
     import adafruit_dht
-    
+
     dhtDevice = adafruit_dht.DHT22(board.D4)
 
     while True:
@@ -41,8 +41,12 @@ if __name__ == "__main__":
             hum = dhtDevice.humidity or 0
             with open(JSON_path, "w") as f:
                 json.dump({"r_temp": temp_c, "r_humidity": hum}, f)
-            print(f"Temperature: {temp_c:.1f} C  Humidity: {hum:.1f}%")
+
+            if __name__ == "__main__": print(f"Temperature: {temp_c:.1f} C  Humidity: {hum:.1f}%")
             time.sleep(1)
         except Exception as e:
             print("Error:", e)
             time.sleep(2)
+
+if __name__ == "__main__":
+    update_temp_loop()
