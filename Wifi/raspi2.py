@@ -7,16 +7,19 @@ import random
 import requests
 import json
 import time
+import sys
+from pathlib import Path
 
 from fastapi import FastAPI,Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any
 
+PYPATH = Path(__file__).resolve().parent.parent / "LED"
+sys.path.append(str(PYPATH))
+
 # imported via unimate environment
-import TempSensor as temp
-import LuxSensor as lux
+from shared_utils import device_controls as dc, TempSensor as temp, LuxSensor as lux
 import LED_Strip as led
-import func as f
 
 RECONNECT_DELAY = 5 # connect again in?
 
@@ -183,14 +186,14 @@ async def setLights(req:Request):
     print("\033[94m" + "Body: ", body, "\033[0m")
 
     new_auto = bool(body.get("autoLight", False))
-    if(new_auto and not f.auto_light_on):
-        asyncio.create_task(f.autoBrightness())
-    elif(not new_auto and f.auto_light_on):
-        f.stopAutoBrightness()
+    if(new_auto and not dc.auto_light_on):
+        asyncio.create_task(dc.autoBrightness())
+    elif(not new_auto and dc.auto_light_on):
+        dc.stopAutoBrightness()
     
-    f.auto_light_on = new_auto
+    dc.auto_light_on = new_auto
     
-    f.control_light(
+    dc.control_light(
         rgb = body.get('light', "ffffff"),
         brightness = int(body.get('brightness', 255)),
         )
@@ -201,9 +204,16 @@ async def setLights(req:Request):
 async def setFan(req:Request):
     body=await req.json()
     print("\033[94m" + "Body: ", body, "\033[0m")
-    f.control_fan(int(body.get('fanSpeed', 0)))
+    dc.control_fan(int(body.get('fanSpeed', 0)))
 
 @app.post("/set-humid")
 async def setHumid(req:Request):
     body=await req.json()
     print("\033[94m" + "Body: ", body, "\033[0m")
+
+    
+@app.post("/mcqs")
+async def mcqs(req:Request):
+    body=await req.json()
+    print("\033[94m" + "Body: ", body, "\033[0m")
+    return {"ok":True}
