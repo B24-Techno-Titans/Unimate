@@ -17,15 +17,12 @@ from typing import Callable
 
 from dotenv import load_dotenv
 from openai import OpenAI
-import requests
 import speech_recognition as sr
 
-_nlp_dir = Path(__file__).resolve().parent.parent / "NLP"
+from raspi_bridge import apply_led_state, set_fan, set_humidifier  # noqa: E402
+
 _env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(_env_path, override=True)
-if str(_nlp_dir) not in sys.path:
-    sys.path.insert(0, str(_nlp_dir))
-from humidifier import set_humidifier  # noqa: E402
 
 for _logger_name in ("openai", "httpx", "httpcore"):
     logging.getLogger(_logger_name).setLevel(logging.WARNING)
@@ -34,10 +31,8 @@ PIPER_EXE = "/home/unimate/unimate_tts/piper/piper"
 VOICE_MODEL = "/home/unimate/unimate_tts/en_US-hfc_female-medium.onnx"
 AUDIO_OUTPUT = "default"
 
-LED_ON_URL = "http://led-controller.local/set-colour?rgb=%23ff00ff&brightness=150"
-LED_OFF_URL = "http://led-controller.local/set-colour?rgb=%23000000&brightness=0"
-FAN_ON_URL = "http://smart-fan.local/set-speed?speed=2"
-FAN_OFF_URL = "http://smart-fan.local/set-speed?speed=0"
+_DEFAULT_LED_COLOR = (1.0, 0.0, 1.0)
+_DEFAULT_LED_BRIGHTNESS = 150 / 255.0
 
 WAKE_WORD = "wake up"
 
@@ -50,7 +45,6 @@ COMMAND_PHRASE_TIME_LIMIT_S = 8
 COMMAND_AMBIENT_CALIBRATION_S = 0.5
 RECOGNIZER_NON_SPEAKING_DURATION_S = 0.5
 RECOGNIZER_PHRASE_THRESHOLD = 0.25
-DEVICE_REQUEST_TIMEOUT_S = 3
 OPENAI_MODEL = "gpt-4o-mini"
 OPENAI_TEMPERATURE = 0.7
 OPENAI_HISTORY_REQUESTS = 1
@@ -190,17 +184,25 @@ def listen_for_command(cancel_event: threading.Event | None = None) -> str:
 def handle_command(text: str) -> None:
     if "led" in text or "light" in text:
         if "on" in text:
-            requests.get(LED_ON_URL, timeout=DEVICE_REQUEST_TIMEOUT_S)
+            apply_led_state(
+                led_on=True,
+                led_brightness=_DEFAULT_LED_BRIGHTNESS,
+                led_color=_DEFAULT_LED_COLOR,
+            )
             return
         if "off" in text:
-            requests.get(LED_OFF_URL, timeout=DEVICE_REQUEST_TIMEOUT_S)
+            apply_led_state(
+                led_on=False,
+                led_brightness=_DEFAULT_LED_BRIGHTNESS,
+                led_color=_DEFAULT_LED_COLOR,
+            )
             return
 
     if "fan" in text:
         if "on" in text:
-            requests.get(FAN_ON_URL, timeout=DEVICE_REQUEST_TIMEOUT_S)
+            set_fan(2)
         elif "off" in text:
-            requests.get(FAN_OFF_URL, timeout=DEVICE_REQUEST_TIMEOUT_S)
+            set_fan(0)
         return
 
     if "humidifier" in text:
@@ -224,7 +226,7 @@ def should_answer_with_ai(text: str) -> bool:
 
 
 def _trim_conversation_history() -> None:
-    """Keep system prompt plus the last N request/response pairs."""
+    """Keep only the system prompt and the last configured request/answer pair."""
     global conversation
     history_messages = max(0, OPENAI_HISTORY_REQUESTS) * 2
     if history_messages == 0:

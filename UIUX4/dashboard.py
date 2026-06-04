@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import math
 import random
+import re
 import subprocess
 import threading
 import time
@@ -34,6 +36,7 @@ from kivy.uix.slider import Slider
 from kivy.uix.widget import Widget
 
 from mock_state import MockState
+from raspi_bridge import apply_led_state, set_fan, set_humidifier
 from nlp_functions import (
     AskBunnyHandlers,
     CAPTION_AUDIO_LAG_S,
@@ -124,6 +127,21 @@ _LED_ROTATE_BRIGHT = 0.32
 _LED_OFF_EPS = 0.02
 # Touch panels often deliver touch + emulated mouse as duplicate on_press events.
 _LED_TOGGLE_DEBOUNCE_S = 0.35
+_LED_BRIDGE_DEBOUNCE_S = 0.35
+
+
+def _bridge_worker(call: Callable[[], bool], callback: Callable[[bool], None]) -> None:
+    """Run a bridge HTTP call off the UI thread; invoke callback on the main thread."""
+
+    def _run() -> None:
+        ok = False
+        try:
+            ok = call()
+        except Exception as exc:
+            print(f"[dashboard] bridge call error: {exc}")
+        Clock.schedule_once(lambda _dt: callback(ok), 0)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _led_effective_on(state: MockState) -> bool:
@@ -243,6 +261,141 @@ STUDY_WHEEL_SCROLL_ANIM_S = 0.22
 STUDY_WHEEL_SCROLL_SETTLE_S = 0.08
 STUDY_WHEEL_CENTER_ROW = (STUDY_WHEEL_VISIBLE_ROWS - 1) // 2
 
+# MCQ popup — same footprint as Ask From Bunny
+STUDY_MCQ_POPUP_SIZE = STUDY_ASK_POPUP_SIZE
+STUDY_MCQ_POPUP_PAD = (dp(40), dp(14), dp(40), dp(36))
+STUDY_MCQ_QUESTION_H = dp(118)
+STUDY_MCQ_ANSWER_H = dp(78)
+STUDY_MCQ_ANSWER_RADIUS = dp(18)
+STUDY_MCQ_GRID_GAP = dp(14)
+STUDY_MCQ_NAV_H = dp(50)
+STUDY_MCQ_NAV_W = dp(150)
+STUDY_MCQ_QUESTION_FONT = sp(28)
+STUDY_MCQ_ANSWER_FONT = sp(24)
+STUDY_MCQ_NAV_FONT = sp(20)
+STUDY_MCQ_ANSWER_BORDER = dp(0.9)
+STUDY_MCQ_ANSWER_BORDER_SEL = dp(1.2)
+# Touch displays can emit touch + emulated mouse presses for one finger tap.
+STUDY_MCQ_ACTION_DEBOUNCE_S = 0.4
+STUDY_MCQ_TOUCH_SLOP = dp(22)
+STUDY_MCQ_SCROLL_SLOP = dp(14)
+STUDY_MCQ_FILE_ROW_H = dp(72)
+STUDY_MCQ_FILE_LIST_FONT = sp(22)
+STUDY_MCQ_FILE_SUB_FONT = sp(16)
+STUDY_MCQ_RESULTS_ROW_FONT = sp(20)
+STUDY_MCQ_RESULTS_ROW_H = dp(44)
+
+_SAVED_MCQ_DIR = Path(__file__).resolve().parent.parent / "saved"
+_SAVED_MCQ_MAX_FILES = 10
+
+_MCQ_LETTERS = ("A", "B", "C", "D")
+
+
+def _schedule_touch_safe(
+    owner: object,
+    callback: Callable[[], None],
+    *,
+    debounce_s: float = STUDY_MCQ_ACTION_DEBOUNCE_S,
+) -> None:
+    """Coalesce duplicate touch+mouse releases into one callback."""
+    last_at = getattr(owner, "_touch_safe_last_at", -1.0)
+    now = Clock.get_time()
+    if now - last_at < debounce_s:
+        return
+    ev = getattr(owner, "_touch_safe_ev", None)
+    if ev is not None:
+        return
+
+    def _run(_dt: float) -> None:
+        owner._touch_safe_ev = None
+        owner._touch_safe_last_at = Clock.get_time()
+        callback()
+
+    owner._touch_safe_ev = Clock.schedule_once(_run, 0)
+
+
+def _touch_is_tap(
+    touch,
+    *,
+    down_x: float,
+    down_y: float,
+    slop: float = STUDY_MCQ_TOUCH_SLOP,
+) -> bool:
+    if not touch:
+        return False
+    return abs(touch.x - down_x) <= slop and abs(touch.y - down_y) <= slop
+
+
+def _quiz_display_name(path: Path) -> str:
+    stem = path.stem
+    stem = re.sub(r"\s+copy\s+(\d+)$", r" (Set \1)", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"\s+copy$", " (Set 1)", stem, flags=re.IGNORECASE)
+    return stem.replace("-", " — ")
+
+
+def _list_saved_mcq_files() -> list[Path]:
+    if not _SAVED_MCQ_DIR.is_dir():
+        return []
+    files = [p for p in _SAVED_MCQ_DIR.glob("*.json") if p.is_file()]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[:_SAVED_MCQ_MAX_FILES]
+
+
+def _answer_index(options: list[str], answer_raw: object) -> int | None:
+    if isinstance(answer_raw, bool):
+        return None
+    if isinstance(answer_raw, int):
+        return max(0, min(3, answer_raw))
+    if not isinstance(answer_raw, str):
+        return None
+    text = answer_raw.strip()
+    if not text:
+        return None
+    try:
+        return options.index(text)
+    except ValueError:
+        pass
+    lower = text.casefold()
+    for i, opt in enumerate(options):
+        if opt.strip().casefold() == lower:
+            return i
+    return None
+
+
+def _normalize_mcq_item(raw: object) -> dict[str, object] | None:
+    if not isinstance(raw, dict):
+        return None
+    question = raw.get("question")
+    options_raw = raw.get("options")
+    if not isinstance(question, str) or not question.strip():
+        return None
+    if not isinstance(options_raw, list) or len(options_raw) < 2:
+        return None
+    options = [str(o) for o in options_raw[:4]]
+    while len(options) < 4:
+        options.append("")
+    answer_idx = _answer_index(options, raw.get("answer"))
+    if answer_idx is None:
+        return None
+    return {"question": question.strip(), "options": options, "answer": answer_idx}
+
+
+def _load_mcqs_from_file(path: Path) -> list[dict[str, object]]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[dashboard] MCQ load error ({path.name}): {exc}")
+        return []
+    mcqs = data.get("mcqs") if isinstance(data, dict) else None
+    if not isinstance(mcqs, list):
+        return []
+    out: list[dict[str, object]] = []
+    for item in mcqs:
+        norm = _normalize_mcq_item(item)
+        if norm is not None:
+            out.append(norm)
+    return out
+
 
 def _format_timer_seconds(total: int) -> str:
     total = max(0, int(total))
@@ -318,6 +471,472 @@ class GlowPanel(BoxLayout):
         for ln in self._glow_lines:
             ln.rounded_rectangle = rr
         self._hairline.rounded_rectangle = rr
+
+
+class MCQChoiceButton(Button):
+    """Touchable rounded MCQ answer tile with selection and check feedback glow."""
+
+    def __init__(
+        self,
+        option_index: int,
+        *,
+        on_select: Callable[[int], None],
+        **kwargs,
+    ):
+        super().__init__(
+            font_size=STUDY_MCQ_ANSWER_FONT,
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            halign="left",
+            valign="middle",
+            padding=(dp(14), dp(10)),
+            background_normal="",
+            background_down="",
+            background_color=(0, 0, 0, 0),
+            **kwargs,
+        )
+        self._option_index = option_index
+        self._on_select = on_select
+        self._selected = False
+        self._feedback: str | None = None  # None | "correct" | "wrong"
+        self._feedback_phase = 0.0
+        self._feedback_tick = None
+        self._feedback_boost_until = 0.0
+        self.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width - dp(24), None)))
+        with self.canvas.before:
+            self._outer_glow_color = Color(Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], 0)
+            self._outer_glow = Line(
+                rounded_rectangle=(
+                    self.x,
+                    self.y,
+                    self.width,
+                    self.height,
+                    STUDY_MCQ_ANSWER_RADIUS,
+                ),
+                width=STUDY_MCQ_ANSWER_BORDER_SEL * 4.4,
+                cap="round",
+            )
+            self._inner_glow_color = Color(Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], 0)
+            self._inner_glow = Line(
+                rounded_rectangle=(
+                    self.x,
+                    self.y,
+                    self.width,
+                    self.height,
+                    STUDY_MCQ_ANSWER_RADIUS,
+                ),
+                width=STUDY_MCQ_ANSWER_BORDER_SEL * 2.5,
+                cap="round",
+            )
+            self._fill_color = Color(*Theme.PANEL_HI)
+            self._fill = RoundedRectangle(
+                pos=self.pos,
+                size=self.size,
+                radius=[STUDY_MCQ_ANSWER_RADIUS] * 4,
+            )
+            self._border_color = Color(*Theme.BORDER_VIOLET_SOFT)
+            self._border = Line(
+                rounded_rectangle=(
+                    self.x,
+                    self.y,
+                    self.width,
+                    self.height,
+                    STUDY_MCQ_ANSWER_RADIUS,
+                ),
+                width=STUDY_MCQ_ANSWER_BORDER,
+            )
+        self.bind(pos=self._sync_canvas, size=self._sync_canvas)
+        self._touch_down_pos: tuple[float, float] | None = None
+        self._touch_id = None
+
+    def _emit_select(self) -> None:
+        if self.disabled:
+            return
+        _schedule_touch_safe(self, lambda: self._on_select(self._option_index))
+
+    def on_touch_down(self, touch):
+        if self.disabled or not self.collide_point(*touch.pos):
+            return super().on_touch_down(touch)
+        self._touch_id = touch.id
+        self._touch_down_pos = (touch.x, touch.y)
+        touch.grab(self)
+        return True
+
+    def on_touch_up(self, touch):
+        if touch.grab_current is not self:
+            return super().on_touch_up(touch)
+        touch.ungrab(self)
+        if self._touch_id != touch.id or self._touch_down_pos is None:
+            return True
+        x0, y0 = self._touch_down_pos
+        self._touch_down_pos = None
+        self._touch_id = None
+        if not self.collide_point(*touch.pos):
+            return True
+        if not _touch_is_tap(touch, down_x=x0, down_y=y0):
+            return True
+        self._emit_select()
+        return True
+
+    def set_label(self, text: str) -> None:
+        self.text = text
+
+    def set_visual(self, *, selected: bool = False, feedback: str | None = None) -> None:
+        self._selected = selected
+        next_feedback = feedback if feedback in ("correct", "wrong") else None
+        if self._feedback != next_feedback:
+            self._feedback_phase = 0.0
+        self._feedback = next_feedback
+        if self._feedback is not None:
+            self._start_feedback_tick()
+        else:
+            self._stop_feedback_tick()
+        self._sync_canvas()
+
+    def pulse_feedback(self, feedback: str) -> None:
+        if feedback not in ("correct", "wrong"):
+            return
+        self._feedback_boost_until = time.monotonic() + 0.42
+        self._start_feedback_tick()
+        self._apply_feedback_glow()
+
+    def _start_feedback_tick(self) -> None:
+        if self._feedback_tick is None:
+            self._feedback_tick = Clock.schedule_interval(self._tick_feedback_glow, 1 / 30.0)
+
+    def _stop_feedback_tick(self) -> None:
+        if self._feedback_tick is not None:
+            self._feedback_tick.cancel()
+            self._feedback_tick = None
+
+    def _tick_feedback_glow(self, dt: float) -> None:
+        if self._feedback is None:
+            self._stop_feedback_tick()
+            return
+        self._feedback_phase += dt
+        self._apply_feedback_glow()
+
+    def _apply_feedback_glow(self) -> None:
+        if self._feedback == "correct":
+            glow = Theme.OK
+            outer_alpha = 0.30
+            inner_alpha = 0.52
+        elif self._feedback == "wrong":
+            glow = Theme.DANGER
+            outer_alpha = 0.32
+            inner_alpha = 0.55
+        else:
+            return
+
+        # Match the robot eyes' breathing feel: bigger/smaller glow, not fixed width.
+        pulse = 0.88 + 0.12 * math.sin(self._feedback_phase * 2.0)
+        boost = 1.0
+        if time.monotonic() < self._feedback_boost_until:
+            boost = 1.22
+        self._outer_glow.width = STUDY_MCQ_ANSWER_BORDER_SEL * 4.4 * pulse * boost
+        self._inner_glow.width = STUDY_MCQ_ANSWER_BORDER_SEL * 2.5 * pulse * boost
+        alpha_boost = 1.25 if boost > 1.0 else 1.0
+        self._outer_glow_color.rgba = (
+            glow[0],
+            glow[1],
+            glow[2],
+            min(0.72, outer_alpha * alpha_boost),
+        )
+        self._inner_glow_color.rgba = (
+            glow[0],
+            glow[1],
+            glow[2],
+            min(0.85, inner_alpha * alpha_boost),
+        )
+
+    def _sync_canvas(self, *_args) -> None:
+        if self._feedback == "correct":
+            self._fill_color.rgba = Theme.PANEL_HI
+            self._border_color.rgba = Theme.OK
+            self._apply_feedback_glow()
+            self.color = Theme.ACCENT_SOFT
+            border_w = STUDY_MCQ_ANSWER_BORDER_SEL
+        elif self._feedback == "wrong":
+            self._fill_color.rgba = Theme.PANEL_HI
+            self._border_color.rgba = Theme.DANGER
+            self._apply_feedback_glow()
+            self.color = Theme.ACCENT_SOFT
+            border_w = STUDY_MCQ_ANSWER_BORDER_SEL
+        elif self._selected:
+            self._fill_color.rgba = Theme.PANEL_HI
+            self._border_color.rgba = Theme.CYAN
+            self._outer_glow_color.rgba = (Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], 0.14)
+            self._inner_glow_color.rgba = (Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], 0.25)
+            self._outer_glow.width = STUDY_MCQ_ANSWER_BORDER_SEL * 4.4
+            self._inner_glow.width = STUDY_MCQ_ANSWER_BORDER_SEL * 2.5
+            self.color = Theme.ACCENT_SOFT
+            border_w = STUDY_MCQ_ANSWER_BORDER_SEL
+        else:
+            self._fill_color.rgba = Theme.PANEL
+            self._border_color.rgba = Theme.BORDER_VIOLET_SOFT
+            self._outer_glow_color.rgba = (Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], 0)
+            self._inner_glow_color.rgba = (Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], 0)
+            self._outer_glow.width = STUDY_MCQ_ANSWER_BORDER_SEL * 4.4
+            self._inner_glow.width = STUDY_MCQ_ANSWER_BORDER_SEL * 2.5
+            self.color = Theme.ACCENT_SOFT
+            border_w = STUDY_MCQ_ANSWER_BORDER
+        self._fill.pos = self.pos
+        self._fill.size = self.size
+        rr = (
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            STUDY_MCQ_ANSWER_RADIUS,
+        )
+        self._outer_glow.rounded_rectangle = rr
+        self._inner_glow.rounded_rectangle = rr
+        self._border.rounded_rectangle = (
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            STUDY_MCQ_ANSWER_RADIUS,
+        )
+        self._border.width = border_w
+
+
+class MCQNavButton(Button):
+    """Prev / Check / Next — touch-safe (no duplicate touch+mouse presses)."""
+
+    def __init__(self, label: str, **kwargs):
+        self._on_safe_press: Callable[[], None] | None = kwargs.pop("on_safe_press", None)
+        super().__init__(
+            text=label,
+            font_size=STUDY_MCQ_NAV_FONT,
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            background_normal="",
+            background_down="",
+            background_color=(0, 0, 0, 0),
+            **kwargs,
+        )
+        self._flash_ev = None
+        self._touch_down_pos: tuple[float, float] | None = None
+        self._touch_id = None
+        with self.canvas.before:
+            self._fill_color = Color(*Theme.PANEL)
+            self._fill = RoundedRectangle(
+                pos=self.pos,
+                size=self.size,
+                radius=[dp(14)] * 4,
+            )
+            self._border_color = Color(*Theme.BORDER_VIOLET_SOFT)
+            self._border = Line(
+                rounded_rectangle=(self.x, self.y, self.width, self.height, dp(14)),
+                width=dp(1.5),
+            )
+        self.bind(pos=self._sync_canvas, size=self._sync_canvas)
+
+    def bind_safe_press(self, callback: Callable[[], None]) -> None:
+        self._on_safe_press = callback
+
+    def _emit_safe_press(self) -> None:
+        if self._on_safe_press is None or self.disabled:
+            return
+        _schedule_touch_safe(self, self._on_safe_press)
+
+    def on_touch_down(self, touch):
+        if self.disabled or not self.collide_point(*touch.pos):
+            return super().on_touch_down(touch)
+        self._touch_id = touch.id
+        self._touch_down_pos = (touch.x, touch.y)
+        touch.grab(self)
+        return True
+
+    def on_touch_up(self, touch):
+        if touch.grab_current is not self:
+            return super().on_touch_up(touch)
+        touch.ungrab(self)
+        if self._touch_id != touch.id or self._touch_down_pos is None:
+            return True
+        x0, y0 = self._touch_down_pos
+        self._touch_down_pos = None
+        self._touch_id = None
+        if not self.collide_point(*touch.pos):
+            return True
+        if not _touch_is_tap(touch, down_x=x0, down_y=y0):
+            return True
+        self._emit_safe_press()
+        return True
+
+    def _sync_canvas(self, *_args) -> None:
+        self._fill_color.rgba = Theme.PANEL
+        self._border_color.rgba = Theme.BORDER_VIOLET_SOFT
+        self._fill.pos = self.pos
+        self._fill.size = self.size
+        self._border.rounded_rectangle = (self.x, self.y, self.width, self.height, dp(14))
+
+    def flash_danger(self, duration: float = 0.35) -> None:
+        if self._flash_ev is not None:
+            self._flash_ev.cancel()
+        self._border_color.rgba = Theme.DANGER
+        self._fill_color.rgba = (Theme.DANGER[0], Theme.DANGER[1], Theme.DANGER[2], 0.22)
+
+        def _restore(_dt: float) -> None:
+            self._flash_ev = None
+            self._sync_canvas()
+
+        self._flash_ev = Clock.schedule_once(_restore, duration)
+
+
+class MCQFileListScroll(ScrollView):
+    """Marks touches that moved enough to count as scrolling (not a row tap)."""
+
+    def on_touch_down(self, touch):
+        touch.ud["mcq_list_scrolled"] = False
+        touch.ud["mcq_list_down_x"] = touch.x
+        touch.ud["mcq_list_down_y"] = touch.y
+        return super().on_touch_down(touch)
+
+    def on_touch_move(self, touch):
+        if abs(touch.y - touch.ud.get("mcq_list_down_y", touch.y)) > STUDY_MCQ_SCROLL_SLOP:
+            touch.ud["mcq_list_scrolled"] = True
+        if abs(touch.x - touch.ud.get("mcq_list_down_x", touch.x)) > STUDY_MCQ_SCROLL_SLOP:
+            touch.ud["mcq_list_scrolled"] = True
+        return super().on_touch_move(touch)
+
+
+class MCQFileRow(BoxLayout):
+    """Scroll-friendly quiz file row — tap only when the finger did not scroll."""
+
+    _ROW_RADIUS = dp(14)
+
+    def __init__(
+        self,
+        title: str,
+        subtitle: str,
+        *,
+        on_pick: Callable[[], None],
+        **kwargs,
+    ):
+        super().__init__(
+            orientation="vertical",
+            padding=(dp(14), dp(10)),
+            spacing=dp(2),
+            size_hint_y=None,
+            height=STUDY_MCQ_FILE_ROW_H,
+            **kwargs,
+        )
+        self._on_pick = on_pick
+        self._touched = False
+        self._pick_delay_ev = None
+        with self.canvas.before:
+            self._outer_glow_color = Color(Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], 0)
+            self._outer_glow = Line(
+                rounded_rectangle=(self.x, self.y, self.width, self.height, self._ROW_RADIUS),
+                width=STUDY_MCQ_ANSWER_BORDER_SEL * 4.4,
+                cap="round",
+            )
+            self._inner_glow_color = Color(Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], 0)
+            self._inner_glow = Line(
+                rounded_rectangle=(self.x, self.y, self.width, self.height, self._ROW_RADIUS),
+                width=STUDY_MCQ_ANSWER_BORDER_SEL * 2.5,
+                cap="round",
+            )
+            self._fill_color = Color(*Theme.PANEL)
+            self._fill = RoundedRectangle(
+                pos=self.pos,
+                size=self.size,
+                radius=[self._ROW_RADIUS] * 4,
+            )
+            self._border_color = Color(*Theme.BORDER_VIOLET_SOFT)
+            self._border = Line(
+                rounded_rectangle=(self.x, self.y, self.width, self.height, self._ROW_RADIUS),
+                width=dp(1.2),
+            )
+        self.bind(pos=self._sync_canvas, size=self._sync_canvas)
+        title_lbl = Label(
+            text=title,
+            font_size=STUDY_MCQ_FILE_LIST_FONT,
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            halign="left",
+            valign="middle",
+            size_hint_y=0.62,
+        )
+        title_lbl.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+        sub_lbl = Label(
+            text=subtitle,
+            font_size=STUDY_MCQ_FILE_SUB_FONT,
+            color=Theme.MUTED,
+            halign="left",
+            valign="middle",
+            size_hint_y=0.38,
+        )
+        sub_lbl.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+        self.add_widget(title_lbl)
+        self.add_widget(sub_lbl)
+
+    def _sync_canvas(self, *_args) -> None:
+        rr = (self.x, self.y, self.width, self.height, self._ROW_RADIUS)
+        self._outer_glow.rounded_rectangle = rr
+        self._inner_glow.rounded_rectangle = rr
+        self._fill.pos = self.pos
+        self._fill.size = self.size
+        self._border.rounded_rectangle = rr
+        if self._touched:
+            self._fill_color.rgba = Theme.PANEL_HI
+            self._border_color.rgba = Theme.CYAN
+            self._outer_glow_color.rgba = (Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], 0.14)
+            self._inner_glow_color.rgba = (Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], 0.25)
+            self._border.width = STUDY_MCQ_ANSWER_BORDER_SEL
+        else:
+            self._fill_color.rgba = Theme.PANEL
+            self._border_color.rgba = Theme.BORDER_VIOLET_SOFT
+            self._outer_glow_color.rgba = (Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], 0)
+            self._inner_glow_color.rgba = (Theme.CYAN[0], Theme.CYAN[1], Theme.CYAN[2], 0)
+            self._border.width = dp(1.2)
+
+    def _set_touched(self, active: bool) -> None:
+        self._touched = active
+        self._sync_canvas()
+
+    def _emit_pick(self) -> None:
+        self._set_touched(True)
+        if self._pick_delay_ev is not None:
+            self._pick_delay_ev.cancel()
+
+        def _after_glow(_dt: float) -> None:
+            self._pick_delay_ev = None
+            self._set_touched(False)
+            self._on_pick()
+
+        self._pick_delay_ev = Clock.schedule_once(_after_glow, 0.14)
+
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos):
+            touch.ud["mcq_file_row"] = self
+            touch.ud["mcq_file_row_x"] = touch.x
+            touch.ud["mcq_file_row_y"] = touch.y
+            touch.ud["mcq_file_row_id"] = touch.id
+            self._set_touched(True)
+        return False
+
+    def on_touch_up(self, touch):
+        if touch.ud.get("mcq_file_row") is not self:
+            return False
+        if touch.ud.get("mcq_file_row_id") != touch.id:
+            return False
+        if touch.ud.get("mcq_list_scrolled"):
+            self._set_touched(False)
+            return False
+        if not self.collide_point(*touch.pos):
+            self._set_touched(False)
+            return False
+        x0 = touch.ud.get("mcq_file_row_x", touch.x)
+        y0 = touch.ud.get("mcq_file_row_y", touch.y)
+        if _touch_is_tap(touch, down_x=x0, down_y=y0):
+            _schedule_touch_safe(self, self._emit_pick)
+        else:
+            self._set_touched(False)
+        return False
+
 
 # Study dashboard widgets (require GlowPanel)
 # ---------------------------------------------------------------------------
@@ -574,9 +1193,26 @@ class StudyTile(GlowPanel):
 
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos) and self._on_tap is not None:
-            self._on_tap()
-            return True
+            touch.ud["study_tile"] = self
+            touch.ud["study_tile_x"] = touch.x
+            touch.ud["study_tile_y"] = touch.y
+            touch.ud["study_tile_id"] = touch.id
         return super().on_touch_down(touch)
+
+    def on_touch_up(self, touch):
+        if self._on_tap is None:
+            return super().on_touch_up(touch)
+        if (
+            touch.ud.get("study_tile") is self
+            and touch.ud.get("study_tile_id") == touch.id
+            and self.collide_point(*touch.pos)
+        ):
+            x0 = touch.ud.get("study_tile_x", touch.x)
+            y0 = touch.ud.get("study_tile_y", touch.y)
+            if _touch_is_tap(touch, down_x=x0, down_y=y0):
+                _schedule_touch_safe(self, self._on_tap)
+                return True
+        return super().on_touch_up(touch)
 
 
 class WheelRow(Button):
@@ -979,10 +1615,17 @@ class SegmentedLevelControl(BoxLayout):
 class ColorWheel(Widget):
     """HSV color wheel — smooth texture disk, touch to pick custom light color."""
 
-    def __init__(self, state: MockState, on_change: Callable[[], None] | None = None, **kwargs):
+    def __init__(
+        self,
+        state: MockState,
+        on_change: Callable[[], None] | None = None,
+        on_pick: Callable[[tuple[float, float, float]], None] | None = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.state = state
         self.on_change = on_change
+        self.on_pick = on_pick
         self._wheel_tex: Texture | None = None
         self._wheel_tex_px = 0
         self.bind(pos=self._redraw, size=self._redraw)
@@ -1008,9 +1651,12 @@ class ColorWheel(Widget):
         hue = (math.degrees(angle) + 360.0) % 360.0 / 360.0
         sat = min(1.0, dist / r)
         rgb = _hsv_to_rgb(hue, sat, 1.0)
-        self.state.set_led_color(rgb)
-        if self.on_change:
-            self.on_change()
+        if self.on_pick is not None:
+            self.on_pick(rgb)
+        else:
+            self.state.set_led_color(rgb)
+            if self.on_change:
+                self.on_change()
         self._redraw()
         return True
 
@@ -1119,14 +1765,25 @@ class LevelDeviceCard(GlowPanel):
         self.refresh()
 
     def _set_level(self, level: int) -> None:
-        if self.kind == "fan":
-            self.state.set_fan_level(level)
-        else:
-            self.state.set_humidifier_level(level)
-        self.refresh()
-        cb = getattr(self, "_refresh_peers", None)
-        if cb:
-            cb()
+        prev = self.state.fan_level if self.kind == "fan" else self.state.humidifier_level
+        if prev == level:
+            return
+
+        def _call() -> bool:
+            return set_fan(level) if self.kind == "fan" else set_humidifier(level)
+
+        def _done(ok: bool) -> None:
+            if ok:
+                if self.kind == "fan":
+                    self.state.set_fan_level(level)
+                else:
+                    self.state.set_humidifier_level(level)
+            self.refresh()
+            cb = getattr(self, "_refresh_peers", None)
+            if cb:
+                cb()
+
+        _bridge_worker(_call, _done)
 
     def refresh(self) -> None:
         lv = self.state.fan_level if self.kind == "fan" else self.state.humidifier_level
@@ -1213,16 +1870,31 @@ class LightBasicCard(GlowPanel):
 
     def _toggle(self) -> None:
         if _led_effective_on(self.state):
-            self.state.set_led(on=False)
+            target_on = False
+            target_brightness = self.state.led_brightness
         else:
-            if self.state.led_brightness <= _LED_OFF_EPS:
-                self.state.set_led(on=True, brightness=0.65)
-            else:
-                self.state.set_led(on=True)
-        self.refresh()
-        cb = getattr(self, "_refresh_peers", None)
-        if cb:
-            cb()
+            target_on = True
+            target_brightness = (
+                0.65 if self.state.led_brightness <= _LED_OFF_EPS else self.state.led_brightness
+            )
+        target_color = self.state.led_color
+
+        def _call() -> bool:
+            return apply_led_state(
+                led_on=target_on,
+                led_brightness=target_brightness,
+                led_color=target_color,
+            )
+
+        def _done(ok: bool) -> None:
+            if ok:
+                self.state.set_led(on=target_on, brightness=target_brightness)
+            self.refresh()
+            cb = getattr(self, "_refresh_peers", None)
+            if cb:
+                cb()
+
+        _bridge_worker(_call, _done)
 
     def refresh(self) -> None:
         on = _led_effective_on(self.state)
@@ -1242,6 +1914,11 @@ class LightColorCard(GlowPanel):
         kwargs.setdefault("height", CONTROL_CARD_H)
         super().__init__(orientation="horizontal", padding=(dp(16), dp(12)), spacing=dp(10), **kwargs)
         self.state = state
+        self._led_bridge_ev = None
+        self._slider_sync = False
+        self._pending_led_on: bool | None = None
+        self._pending_led_brightness: float | None = None
+        self._pending_led_color: tuple[float, float, float] | None = None
 
         left = BoxLayout(orientation="vertical", size_hint_x=0.58, spacing=dp(8))
         top = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(74), spacing=dp(10))
@@ -1288,7 +1965,13 @@ class LightColorCard(GlowPanel):
         meta.add_widget(Widget())
 
         wheel_holder = AnchorLayout(anchor_x="center", anchor_y="center", size_hint_x=0.42)
-        self.wheel = ColorWheel(state, on_change=self.refresh, size_hint=(None, None), size=(dp(164), dp(164)))
+        self.wheel = ColorWheel(
+            state,
+            on_change=self.refresh,
+            on_pick=self._on_color_pick,
+            size_hint=(None, None),
+            size=(dp(164), dp(164)),
+        )
         wheel_holder.add_widget(self.wheel)
 
         left.add_widget(top)
@@ -1310,19 +1993,72 @@ class LightColorCard(GlowPanel):
         self._swatch.bind(pos=_sync_swatch, size=_sync_swatch)
         _sync_swatch()
 
+    def _cancel_led_bridge(self) -> None:
+        if self._led_bridge_ev is not None:
+            self._led_bridge_ev.cancel()
+            self._led_bridge_ev = None
+
+    def _queue_led_bridge(
+        self,
+        *,
+        led_on: bool,
+        brightness: float,
+        color: tuple[float, float, float],
+    ) -> None:
+        self._pending_led_on = led_on
+        self._pending_led_brightness = brightness
+        self._pending_led_color = color
+        self._cancel_led_bridge()
+        self._led_bridge_ev = Clock.schedule_once(self._flush_led_bridge, _LED_BRIDGE_DEBOUNCE_S)
+
+    def _flush_led_bridge(self, _dt: float) -> None:
+        self._led_bridge_ev = None
+        if (
+            self._pending_led_on is None
+            or self._pending_led_brightness is None
+            or self._pending_led_color is None
+        ):
+            return
+        target_on = self._pending_led_on
+        target_brightness = self._pending_led_brightness
+        target_color = self._pending_led_color
+
+        def _call() -> bool:
+            return apply_led_state(
+                led_on=target_on,
+                led_brightness=target_brightness,
+                led_color=target_color,
+            )
+
+        def _done(ok: bool) -> None:
+            self._pending_led_on = None
+            self._pending_led_brightness = None
+            self._pending_led_color = None
+            if ok:
+                self.state.set_led(on=target_on, brightness=target_brightness)
+                self.state.set_led_color(target_color)
+            self.refresh()
+            cb = getattr(self, "_refresh_peers", None)
+            if cb:
+                cb()
+
+        _bridge_worker(_call, _done)
+
+    def _on_color_pick(self, rgb: tuple[float, float, float]) -> None:
+        led_on = _led_effective_on(self.state)
+        brightness = self.state.led_brightness
+        self._queue_led_bridge(led_on=led_on, brightness=brightness, color=rgb)
+
     def _on_brightness(self, _inst, value: float) -> None:
-        if self.slider.disabled:
+        if self.slider.disabled or self._slider_sync:
             return
         v = float(value)
-        self.state.set_led(brightness=v)
-        if v > _LED_OFF_EPS and not self.state.led_on:
-            self.state.set_led(on=True)
-        elif v <= _LED_OFF_EPS and self.state.led_on:
-            self.state.set_led(on=False)
-        self.refresh()
-        cb = getattr(self, "_refresh_peers", None)
-        if cb:
-            cb()
+        desired_on = v > _LED_OFF_EPS
+        self._queue_led_bridge(
+            led_on=desired_on,
+            brightness=v,
+            color=self.state.led_color,
+        )
 
     def refresh(self) -> None:
         pct = int(round(self.state.led_brightness * 100))
@@ -1330,9 +2066,13 @@ class LightColorCard(GlowPanel):
         off_note = " (Currently OFF)" if not on else ""
         self.status.text = f"Intensity: {pct}%{off_note}"
         self.slider.disabled = _led_slider_locked(self.state)
-        self.slider.unbind(value=self._on_brightness)
-        self.slider.value = self.state.led_brightness
-        self.slider.bind(value=self._on_brightness)
+        self._slider_sync = True
+        try:
+            self.slider.unbind(value=self._on_brightness)
+            self.slider.value = self.state.led_brightness
+            self.slider.bind(value=self._on_brightness)
+        finally:
+            self._slider_sync = False
         self._hex_lbl.text = _rgb_to_hex(*self.state.led_color)
         self.wheel._redraw()
         if hasattr(self, "_swatch"):
@@ -1581,6 +2321,8 @@ def build_study_screen() -> Screen:
     ctrl = TimerCtrl()
     timer_tile: StudyTile | None = None
     timer_popup: Popup | None = None
+    mcq_popup: Popup | None = None
+    mcq_file_picker: Popup | None = None
     ask_bunny_popup: Popup | None = None
     thinking_popup: Popup | None = None
     responding_popup: Popup | None = None
@@ -2246,6 +2988,452 @@ def build_study_screen() -> Screen:
         ask_bunny_popup.open()
         _start_ask_bunny_session()
 
+    def _open_mcq_popup(questions: list[dict[str, object]]) -> None:
+        nonlocal mcq_popup
+        if not questions:
+            return
+        if mcq_popup is not None and mcq_popup.parent is not None:
+            return
+        current_idx = 0
+        show_score = False
+        selections: dict[int, int] = {}
+        checked: set[int] = set()
+        answer_buttons: list[MCQChoiceButton] = []
+
+        def _correct_index(q: dict[str, object]) -> int:
+            return int(q.get("answer", 0))
+
+        def _score_right() -> int:
+            return sum(
+                1
+                for i in checked
+                if selections.get(i) == _correct_index(questions[i])
+            )
+
+        def _option_letter(q: dict[str, object], idx: int) -> str:
+            opts = q["options"]
+            if idx < 0 or idx >= len(opts):
+                return _MCQ_LETTERS[max(0, min(3, idx))]
+            return _MCQ_LETTERS[idx]
+
+        def _build_results_summary() -> None:
+            results_inner.clear_widgets()
+            total = len(questions)
+            for i in range(total):
+                q = questions[i]
+                sel = selections.get(i)
+                correct_idx = _correct_index(q)
+                is_right = sel == correct_idx
+                status = "RIGHT" if is_right else "WRONG"
+                status_color = Theme.OK if is_right else Theme.DANGER
+                if is_right:
+                    detail = f"Q{i + 1}: {status} ({_option_letter(q, correct_idx)})"
+                else:
+                    picked = _option_letter(q, sel) if sel is not None else "—"
+                    answer = _option_letter(q, correct_idx)
+                    detail = f"Q{i + 1}: {status} — picked {picked}, answer {answer}"
+                row = Label(
+                    text=detail,
+                    font_size=STUDY_MCQ_RESULTS_ROW_FONT,
+                    bold=True,
+                    color=status_color,
+                    halign="left",
+                    valign="middle",
+                    size_hint_y=None,
+                    height=STUDY_MCQ_RESULTS_ROW_H,
+                )
+                row.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+                results_inner.add_widget(row)
+
+        panel = GlowPanel(
+            orientation="vertical",
+            padding=STUDY_MCQ_POPUP_PAD,
+            spacing=dp(4),
+            size_hint=(1, 1),
+        )
+
+        top_bar = BoxLayout(size_hint_y=None, height=dp(32))
+        top_bar.add_widget(Widget())
+        close_btn = Button(
+            text="×",
+            size_hint=(None, None),
+            width=dp(40),
+            height=dp(40),
+            font_size=sp(28),
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            background_normal="",
+            background_down="",
+            background_color=(0, 0, 0, 0),
+        )
+        top_bar.add_widget(close_btn)
+        panel.add_widget(top_bar)
+
+        question_lbl = Label(
+            text="",
+            font_size=STUDY_MCQ_QUESTION_FONT,
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            halign="left",
+            valign="top",
+            size_hint_y=None,
+            height=STUDY_MCQ_QUESTION_H,
+        )
+        question_lbl.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+        panel.add_widget(question_lbl)
+
+        marks_lbl = Label(
+            text="",
+            font_size=STUDY_MCQ_ANSWER_FONT,
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            halign="center",
+            valign="middle",
+            size_hint_y=None,
+            height=dp(40),
+        )
+        marks_lbl.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+        panel.add_widget(marks_lbl)
+
+        results_scroll = MCQFileListScroll(
+            size_hint_y=1,
+            do_scroll_x=False,
+            bar_width=dp(4),
+            scroll_type=["bars", "content"],
+            opacity=0,
+            disabled=True,
+        )
+        results_inner = BoxLayout(orientation="vertical", spacing=dp(4), size_hint_y=None)
+        results_inner.bind(minimum_height=results_inner.setter("height"))
+        results_scroll.add_widget(results_inner)
+        panel.add_widget(results_scroll)
+
+        answers_grid = GridLayout(
+            cols=2,
+            spacing=STUDY_MCQ_GRID_GAP,
+            size_hint_y=1,
+        )
+
+        def _on_answer_pick(option_idx: int) -> None:
+            if show_score or current_idx in checked:
+                return
+            selections[current_idx] = option_idx
+            _refresh_mcq_view()
+
+        for i in range(4):
+            btn = MCQChoiceButton(
+                i,
+                on_select=_on_answer_pick,
+                size_hint_y=None,
+                height=STUDY_MCQ_ANSWER_H,
+            )
+            answer_buttons.append(btn)
+            answers_grid.add_widget(btn)
+        panel.add_widget(answers_grid)
+
+        nav_row = BoxLayout(
+            size_hint_y=None,
+            height=STUDY_MCQ_NAV_H,
+            spacing=dp(12),
+        )
+        prev_btn = MCQNavButton(
+            "PREV",
+            size_hint=(None, 1),
+            width=STUDY_MCQ_NAV_W,
+        )
+        action_btn = MCQNavButton(
+            "CHECK",
+            size_hint=(None, 1),
+            width=STUDY_MCQ_NAV_W,
+        )
+        nav_row.add_widget(prev_btn)
+        nav_row.add_widget(Widget(size_hint_x=1))
+        nav_row.add_widget(action_btn)
+        panel.add_widget(nav_row)
+
+        def _refresh_mcq_view() -> None:
+            nonlocal show_score
+            if show_score:
+                total = len(questions)
+                right = _score_right()
+                pct = int(round(100 * right / total)) if total else 0
+                question_lbl.text = f"You got {right} / {total} right"
+                question_lbl.halign = "center"
+                question_lbl.valign = "middle"
+                question_lbl.height = dp(56)
+                marks_lbl.text = f"Marks: {pct}%"
+                marks_lbl.opacity = 1
+                marks_lbl.height = dp(40)
+                _build_results_summary()
+                results_scroll.opacity = 1
+                results_scroll.disabled = False
+                results_scroll.size_hint_y = 1
+                results_scroll.height = 0
+                answers_grid.opacity = 0
+                answers_grid.disabled = True
+                answers_grid.size_hint_y = None
+                answers_grid.height = 0
+                prev_btn.text = "PREV"
+                prev_btn.disabled = False
+                prev_btn.opacity = 1.0
+                action_btn.text = "DONE"
+                action_btn.disabled = False
+                action_btn.opacity = 1.0
+                return
+
+            marks_lbl.opacity = 0
+            marks_lbl.text = ""
+            marks_lbl.height = 0
+            results_scroll.opacity = 0
+            results_scroll.disabled = True
+            results_scroll.size_hint_y = None
+            results_scroll.height = 0
+            results_inner.clear_widgets()
+            answers_grid.opacity = 1
+            answers_grid.disabled = False
+            answers_grid.size_hint_y = 1
+            answers_grid.height = 0
+            question_lbl.halign = "left"
+            question_lbl.valign = "top"
+            question_lbl.height = STUDY_MCQ_QUESTION_H
+
+            q = questions[current_idx]
+            opts = q["options"]
+            question_lbl.text = f"{current_idx + 1}. {q['question']}"
+            sel = selections.get(current_idx)
+            is_checked = current_idx in checked
+            correct_idx = _correct_index(q)
+
+            for i, btn in enumerate(answer_buttons):
+                letter = _MCQ_LETTERS[i]
+                opt_text = str(opts[i]) if i < len(opts) else ""
+                has_option = bool(opt_text.strip())
+                btn.set_label(f"{letter}. {opt_text}" if has_option else "")
+                btn.disabled = is_checked or not has_option
+                if not has_option:
+                    btn.set_visual(selected=False, feedback=None)
+                    continue
+                if is_checked:
+                    if i == correct_idx:
+                        btn.set_visual(selected=(sel == i), feedback="correct")
+                    elif sel is not None and i == sel and sel != correct_idx:
+                        btn.set_visual(selected=True, feedback="wrong")
+                    else:
+                        btn.set_visual(selected=False, feedback=None)
+                else:
+                    btn.set_visual(selected=(sel == i), feedback=None)
+
+            if current_idx == 0:
+                prev_btn.text = "BACK"
+                if 0 in checked:
+                    prev_btn.disabled = True
+                    prev_btn.opacity = 0.45
+                else:
+                    prev_btn.disabled = False
+                    prev_btn.opacity = 1.0
+            else:
+                prev_btn.text = "PREV"
+                prev_btn.disabled = False
+                prev_btn.opacity = 1.0
+            if is_checked:
+                action_btn.text = "NEXT"
+            else:
+                action_btn.text = "CHECK"
+            action_btn.disabled = False
+            action_btn.opacity = 1.0
+
+        def _go_prev() -> None:
+            nonlocal current_idx, show_score
+            if show_score:
+                show_score = False
+                current_idx = len(questions) - 1
+                _refresh_mcq_view()
+                return
+            if current_idx == 0 and 0 not in checked:
+                if mcq_popup is not None:
+                    mcq_popup.dismiss()
+                Clock.schedule_once(lambda _dt: _open_mcq_file_picker(), 0)
+                return
+            if current_idx > 0:
+                current_idx -= 1
+                _refresh_mcq_view()
+
+        def _on_check() -> None:
+            selected_idx = selections.get(current_idx)
+            if selected_idx is None:
+                action_btn.flash_danger()
+                return
+            checked.add(current_idx)
+            _refresh_mcq_view()
+            q = questions[current_idx]
+            answer_buttons[selected_idx].pulse_feedback(
+                "correct" if selected_idx == _correct_index(q) else "wrong"
+            )
+
+        def _on_action() -> None:
+            nonlocal current_idx, show_score
+            if show_score:
+                if mcq_popup is not None:
+                    mcq_popup.dismiss()
+                return
+            if current_idx in checked:
+                if current_idx < len(questions) - 1:
+                    current_idx += 1
+                    _refresh_mcq_view()
+                else:
+                    show_score = True
+                    _refresh_mcq_view()
+            else:
+                _on_check()
+
+        prev_btn.bind_safe_press(_go_prev)
+        action_btn.bind_safe_press(_on_action)
+
+        mcq_popup = Popup(
+            title="",
+            content=panel,
+            size_hint=STUDY_MCQ_POPUP_SIZE,
+            auto_dismiss=False,
+            separator_height=0,
+            background="",
+            background_color=Theme.PANEL,
+        )
+
+        def _close_mcq(*_a) -> None:
+            if mcq_popup is not None:
+                mcq_popup.dismiss()
+
+        close_btn.bind(on_press=_close_mcq)
+        _refresh_mcq_view()
+        mcq_popup.open()
+
+    def _open_mcq_file_picker() -> None:
+        nonlocal mcq_file_picker
+        if mcq_file_picker is not None and mcq_file_picker.parent is not None:
+            return
+
+        picker_ready_at = Clock.get_time() + STUDY_MCQ_ACTION_DEBOUNCE_S
+        quiz_files = _list_saved_mcq_files()
+
+        def _pick_file_guarded(path: Path) -> None:
+            now = Clock.get_time()
+            if now < picker_ready_at:
+                return
+            _pick_file(path)
+
+        panel = GlowPanel(
+            orientation="vertical",
+            padding=STUDY_MCQ_POPUP_PAD,
+            spacing=dp(8),
+            size_hint=(1, 1),
+        )
+
+        top_bar = BoxLayout(size_hint_y=None, height=dp(32))
+        top_bar.add_widget(Widget())
+        close_btn = Button(
+            text="×",
+            size_hint=(None, None),
+            width=dp(40),
+            height=dp(40),
+            font_size=sp(28),
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            background_normal="",
+            background_down="",
+            background_color=(0, 0, 0, 0),
+        )
+        top_bar.add_widget(close_btn)
+        panel.add_widget(top_bar)
+
+        title_lbl = Label(
+            text="CHOOSE QUIZ",
+            font_size=STUDY_ASK_POPUP_TITLE,
+            bold=True,
+            color=Theme.ACCENT_SOFT,
+            halign="center",
+            valign="middle",
+            size_hint_y=None,
+            height=dp(48),
+        )
+        title_lbl.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+        panel.add_widget(title_lbl)
+
+        status_lbl = Label(
+            text="",
+            font_size=STUDY_MCQ_FILE_SUB_FONT,
+            color=Theme.DANGER,
+            halign="center",
+            valign="middle",
+            size_hint_y=None,
+            height=dp(28),
+        )
+        status_lbl.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+        panel.add_widget(status_lbl)
+
+        list_scroll = MCQFileListScroll(
+            size_hint_y=1,
+            do_scroll_x=False,
+            bar_width=dp(4),
+            scroll_type=["bars", "content"],
+        )
+        list_inner = BoxLayout(orientation="vertical", spacing=dp(10), size_hint_y=None)
+        list_inner.bind(minimum_height=list_inner.setter("height"))
+
+        def _pick_file(path: Path) -> None:
+            questions = _load_mcqs_from_file(path)
+            if not questions:
+                status_lbl.text = "No valid questions in this file."
+                status_lbl.color = Theme.DANGER
+                return
+            status_lbl.text = ""
+            if mcq_file_picker is not None:
+                mcq_file_picker.dismiss()
+            _open_mcq_popup(questions)
+
+        if not quiz_files:
+            empty_lbl = Label(
+                text="No quiz files found in saved.",
+                font_size=STUDY_MCQ_FILE_LIST_FONT,
+                color=Theme.MUTED,
+                halign="center",
+                valign="middle",
+                size_hint_y=None,
+                height=dp(80),
+            )
+            empty_lbl.bind(size=lambda inst, *_: setattr(inst, "text_size", (inst.width, None)))
+            list_inner.add_widget(empty_lbl)
+        else:
+            for path in quiz_files:
+                n = len(_load_mcqs_from_file(path))
+                subtitle = f"{n} question{'s' if n != 1 else ''}"
+                list_inner.add_widget(
+                    MCQFileRow(
+                        _quiz_display_name(path),
+                        subtitle,
+                        on_pick=lambda p=path: _pick_file_guarded(p),
+                    )
+                )
+
+        list_scroll.add_widget(list_inner)
+        panel.add_widget(list_scroll)
+
+        mcq_file_picker = Popup(
+            title="",
+            content=panel,
+            size_hint=STUDY_MCQ_POPUP_SIZE,
+            auto_dismiss=False,
+            separator_height=0,
+            background="",
+            background_color=Theme.PANEL,
+        )
+
+        def _close_picker(*_a) -> None:
+            if mcq_file_picker is not None:
+                mcq_file_picker.dismiss()
+
+        close_btn.bind(on_press=_close_picker)
+        mcq_file_picker.open()
+
     def _on_timer_tile_tap() -> None:
         if ctrl.alarm_active:
             _silence_from_tile()
@@ -2255,12 +3443,16 @@ def build_study_screen() -> Screen:
     def _on_ask_bunny_tile_tap() -> None:
         _open_ask_bunny_popup()
 
+    def _on_generate_mcq_tile_tap() -> None:
+        # Defer so the tile touch-up cannot land on the first file row in the new popup.
+        Clock.schedule_once(lambda _dt: _open_mcq_file_picker(), 0)
+
     tile_defs: list[tuple[str, str, Callable[[], None] | None]] = [
         ("question.png", "ASK FROM BUNNY", _on_ask_bunny_tile_tap),
         ("timer.png", "STUDY TIMER", _on_timer_tile_tap),
         ("open-book.png", "SUMMARIZE NOTES", None),
         ("to-do.png", "TO-DO LIST", None),
-        ("ballot.png", "GENERATE MCQ", None),
+        ("ballot.png", "GENERATE MCQ", _on_generate_mcq_tile_tap),
         ("speech-to-text.png", "GENERATE QUIZ\n(VOICE QUIZ)", None),
     ]
 

@@ -1,0 +1,57 @@
+{
+    "status": "success",
+    "total_pages": 11,
+    "total_chunks": 7,
+    "mcqs": [
+        {
+            "question": "Which of the following is listed as a Structured Query Language Command type?",
+            "options": [
+                "DDL",
+                "DCL",
+                "DML",
+                "All of the above"
+            ],
+            "answer": "All of the above"
+        },
+        {
+            "question": "Which SQL Join type matches each tuple in one table to all the tuples in the other table without any conditions?",
+            "options": [
+                "Inner Join",
+                "Natural Join",
+                "Cross Join",
+                "Left Outer Join"
+            ],
+            "answer": "Cross Join"
+        },
+        {
+            "question": "Which aggregate function returns the total value of a column in a database table?",
+            "options": [
+                "MIN()",
+                "AVG()",
+                "COUNT()",
+                "SUM()"
+            ],
+            "answer": "SUM()"
+        },
+        {
+            "question": "A Subquery, Inner query, or Nested query is incorporated into which clause of another SQL query?",
+            "options": [
+                "SELECT clause",
+                "FROM clause",
+                "WHERE clause",
+                "GROUP BY clause"
+            ],
+            "answer": "WHERE clause"
+        },
+        {
+            "question": "What is a characteristic of a Correlated Nested Query?",
+            "options": [
+                "It automatically matches similar column names.",
+                "It returns a single value after a calculation on multiple values.",
+                "It reads every row in a table and compares values in each row against related data.",
+                "It joins tables by matching given columns with all tuples in the left-hand side."
+            ],
+            "answer": "It reads every row in a table and compares values in each row against related data."
+        }
+    ]
+}

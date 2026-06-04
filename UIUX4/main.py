@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -69,6 +70,7 @@ from dashboard import (  # noqa: E402
     build_study_screen,
 )
 from mock_state import MockState  # noqa: E402
+from raspi_bridge import SensorReadings, fetch_sensors  # noqa: E402
 from robo_eyes import RoboEyesWidget, schedule_random_idle_charm  # noqa: E402
 from theme import Theme  # noqa: E402
 
@@ -169,6 +171,7 @@ class UniMateKivyUI(BoxLayout):
         super().__init__(orientation="vertical", padding=0, spacing=0, **kwargs)
         self.state = MockState()
         self.sensors_refs: SensorsRefs | None = None
+        self._sensor_poll_busy = False
 
         self.manager = FourScreenSwipeManager(transition=SlideTransition(duration=0.22), size_hint=(1, 1))
 
@@ -220,17 +223,41 @@ class UniMateKivyUI(BoxLayout):
         screen.add_widget(root)
         return screen
 
-    def _tick_state(self) -> None:
-        if not self.sensors_refs:
+    def _tick_state(self, *_args) -> None:
+        if not self.sensors_refs or self._sensor_poll_busy:
             return
-        self.state.tick()
+        self._sensor_poll_busy = True
+
+        def _poll() -> None:
+            readings = fetch_sensors()
+            Clock.schedule_once(lambda _dt: self._apply_sensor_readings(readings), 0)
+
+        threading.Thread(target=_poll, daemon=True).start()
+
+    def _apply_sensor_readings(self, readings: SensorReadings | None) -> None:
+        self._sensor_poll_busy = False
+        if readings is None or not self.sensors_refs:
+            return
+
         r = self.sensors_refs
-        r.temp.set_value(f"{self.state.room_temp_c:.1f} °C", "Avg. Main Room")
-        r.humidity.set_value(f"{self.state.humidity_pct:.0f}%", "Main Room")
-        r.lux.set_value(f"{self.state.lux:.0f} lx", "Lux Intensity")
-        r.heart.set_value(f"{self.state.heart_bpm} bpm", "Real-time, Last 5 mins")
-        r.body_temp.set_value(f"{self.state.body_temp_c:.1f} °C", "Status: Normal")
-        r.spo2.set_value(f"{self.state.spo2_pct:.0f}%", "Status: Optimal")
+        if readings.room_temp_c is not None:
+            self.state.room_temp_c = readings.room_temp_c
+            r.temp.set_value(f"{readings.room_temp_c:.1f} °C", "Avg. Main Room")
+        if readings.humidity_pct is not None:
+            self.state.humidity_pct = readings.humidity_pct
+            r.humidity.set_value(f"{readings.humidity_pct:.0f}%", "Main Room")
+        if readings.lux is not None:
+            self.state.lux = readings.lux
+            r.lux.set_value(f"{readings.lux:.0f} lx", "Lux Intensity")
+        if readings.heart_bpm is not None:
+            self.state.heart_bpm = readings.heart_bpm
+            r.heart.set_value(f"{readings.heart_bpm} bpm", "Real-time, Last 5 mins")
+        if readings.body_temp_c is not None:
+            self.state.body_temp_c = readings.body_temp_c
+            r.body_temp.set_value(f"{readings.body_temp_c:.1f} °C", "Status: Normal")
+        if readings.spo2_pct is not None:
+            self.state.spo2_pct = readings.spo2_pct
+            r.spo2.set_value(f"{readings.spo2_pct:.0f}%", "Status: Optimal")
 
     def _on_screen_changed(self, *_args) -> None:
         cur = self.manager.current

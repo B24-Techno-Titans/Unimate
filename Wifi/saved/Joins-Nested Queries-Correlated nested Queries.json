@@ -1,0 +1,57 @@
+{
+    "status": "success",
+    "total_pages": 11,
+    "total_chunks": 7,
+    "mcqs": [
+        {
+            "question": "Which Structured Query Language command category is associated with Advanced data retrieval?",
+            "options": [
+                "DDL - Data Definition Language",
+                "DCL - Data Control Language",
+                "DML - Data Manipulation Language",
+                "DQL - Data Query Language"
+            ],
+            "answer": "DQL - Data Query Language"
+        },
+        {
+            "question": "Which SQL Join type matches each tuple in one table to all the tuples in the other table without any conditions?",
+            "options": [
+                "Inner Join",
+                "Left Outer Join",
+                "Natural Join",
+                "Cross Join"
+            ],
+            "answer": "Cross Join"
+        },
+        {
+            "question": "What is the primary characteristic of an aggregate function in SQL?",
+            "options": [
+                "It defines the structure of a database table.",
+                "It returns a single value after a calculation is performed on a number of values.",
+                "It manipulates individual data records in a table.",
+                "It controls access permissions for database users."
+            ],
+            "answer": "It returns a single value after a calculation is performed on a number of values."
+        },
+        {
+            "question": "A query that is contained within another SQL query and is incorporated into the WHERE clause is referred to as a:",
+            "options": [
+                "DDL query",
+                "Correlated Nested Query",
+                "Nested Query",
+                "DCL query"
+            ],
+            "answer": "Nested Query"
+        },
+        {
+            "question": "What defines a Correlated Nested Query?",
+            "options": [
+                "It automatically matches similar names of columns between tables.",
+                "It joins tables by matching given columns with all tuples in the left-hand side table.",
+                "It reads every row in a table and compares the values in each row against related data, potentially returning a different result for each candidate row the main query is looking at.",
+                "It returns the total value of a column in a database table."
+            ],
+            "answer": "It reads every row in a table and compares the values in each row against related data, potentially returning a different result for each candidate row the main query is looking at."
+        }
+    ]
+}
