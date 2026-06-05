@@ -1,52 +1,55 @@
 import time
-import json
-from pathlib import Path
 
-JSON_path = Path(__file__).resolve().parent / "temp_data.json"
-def get_temp():
+_MIN_INTERVAL = 2.0
+_readings = {"r_temp": 0.0, "r_humidity": 0.0}
+_last_read = 0.0
+_sensor = None
+
+
+def _get_sensor():
+    global _sensor
+    if _sensor is None:
+        import board
+        import adafruit_dht
+
+        _sensor = adafruit_dht.DHT22(board.D4)
+    return _sensor
+
+
+def _refresh():
+    global _readings, _last_read
+    now = time.monotonic()
+    if now - _last_read < _MIN_INTERVAL:
+        return
     try:
-        with open(JSON_path) as f:
-            line = f.readline()
-            f.seek(0)
-            if len(line) > 0:
-                data = json.loads(line)
-                return data["r_temp"]
-            else:
-                return 0
+        sensor = _get_sensor()
+        _readings = {
+            "r_temp": sensor.temperature or 0,
+            "r_humidity": sensor.humidity or 0,
+        }
+        _last_read = now
     except Exception as e:
-        print("Read error:", e)
+        print("Error:", e)
+
+
+def get_temp():
+    _refresh()
+    return _readings["r_temp"]
+
 
 def get_humidity():
-    try:
-        with open(JSON_path) as f:
-            line = f.readline()
-            f.seek(0)
-            if len(line)>0:
-                data = json.load(f)
-                return data["r_humidity"]
-            else:
-                return 0
-    except Exception as e:
-        print("Read error:", e)
+    _refresh()
+    return _readings["r_humidity"]
 
-def update_temp_loop():
-    import board
-    import adafruit_dht
-
-    dhtDevice = adafruit_dht.DHT22(board.D4)
-
-    while True:
-        try:
-            temp_c = dhtDevice.temperature or 0
-            hum = dhtDevice.humidity or 0
-            with open(JSON_path, "w") as f:
-                json.dump({"r_temp": temp_c, "r_humidity": hum}, f)
-
-            if __name__ == "__main__": print(f"Temperature: {temp_c:.1f} C  Humidity: {hum:.1f}%")
-            time.sleep(1)
-        except Exception as e:
-            print("Error:", e)
-            time.sleep(2)
 
 if __name__ == "__main__":
-    update_temp_loop()
+    try:
+        while True:
+            _refresh()
+            print(
+                f"Temperature: {_readings['r_temp']:.1f} C  "
+                f"Humidity: {_readings['r_humidity']:.1f}%"
+            )
+            time.sleep(_MIN_INTERVAL)
+    except KeyboardInterrupt:
+        print("\nExiting...")

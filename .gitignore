@@ -223,3 +223,8 @@ __marimo__/
 
 # Piper TTS (local binaries and voice data)
 piper/
+
+# Temporary ignore
+UIUX1/
+UIUX2/
+Requirements/

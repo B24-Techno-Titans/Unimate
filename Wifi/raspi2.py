@@ -152,10 +152,6 @@ async def startup_event():
     client_thread = threading.Thread(target=read_esp32_data, daemon=True)
     client_thread.start()
     print("ESP32 Client thread started successfully.")
-    
-    temp_loop = threading.Thread(target=temp.update_temp_loop, daemon=True)
-    temp_loop.start()
-    print("Temperature loop thread started successfully.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -209,7 +205,19 @@ async def setLights(req:Request):
 async def setFan(req:Request):
     body=await req.json()
     print("\033[94m" + "Body: ", body, "\033[0m")
-    dc.control_fan(int(body.get('fanSpeed', 0)))
+
+    new_auto = bool(body.get("autoFan", False))
+    if new_auto and not dc.auto_fan_on:
+        asyncio.create_task(dc.autoFanSpeed())
+    elif not new_auto and dc.auto_fan_on:
+        dc.stopAutoFanSpeed()
+
+    dc.auto_fan_on = new_auto
+
+    if not new_auto:
+        dc.control_fan(int(body.get("fanSpeed", 0)))
+
+    return {"ok": True}
 
 @app.post("/set-humid")
 async def setHumid(req:Request):

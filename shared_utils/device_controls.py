@@ -5,9 +5,12 @@ HUMIDIFIER_URL = "http://humidifier.local/press"
 import asyncio
 import requests
 import math
-from . import LuxSensor
+import time
+from . import LuxSensor, TempSensor
 
 auto_light_on = False
+auto_fan_on = False
+_current_fan_speed = -1
 
 def control_fan(speed: int):
     try:
@@ -96,5 +99,27 @@ def stopAutoBrightness():
     auto_light_on = False
 
 
+def temp_to_fan_speed(temp_c: float) -> int:
+    if temp_c < 26:
+        return 0
+    if temp_c <= 30:
+        return 1
+    return 2
 
+
+async def autoFanSpeed():
+    global auto_fan_on, _current_fan_speed
+    while auto_fan_on:
+        temp_c = TempSensor.get_temp()
+        speed = temp_to_fan_speed(temp_c)
+        if speed != _current_fan_speed:
+            control_fan(speed)
+            _current_fan_speed = speed
+
+        await asyncio.sleep(2)
+
+
+def stopAutoFanSpeed():
+    global auto_fan_on
+    auto_fan_on = False
 
