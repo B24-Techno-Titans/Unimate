@@ -9,6 +9,7 @@ import json
 import time
 import sys
 from pathlib import Path
+import os
 
 from fastapi import FastAPI,Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -215,9 +216,59 @@ async def setHumid(req:Request):
     body=await req.json()
     print("\033[94m" + "Body: ", body, "\033[0m")
 
-    
+# function to delete old files
+def clean_old_files(directory_path,max_files=10):
+    files = [os.path.join(directory_path, f) for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
+    files.sort(key=os.path.getmtime)
+
+    if len(files) > max_files:
+        files_to_delete = files[:-max_files]
+        for file in files_to_delete:
+            try:
+                os.remove(file)
+                print(f"Deleted old file: {file}")
+            except Exception as e:
+                print(f"Error deleting file {file}: {e}")
+# ----------------------------
+
+
+# saved directory
+Directory="../saved/"
+os.makedirs(Directory, exist_ok=True)
 @app.post("/mcqs")
 async def mcqs(req:Request):
     body=await req.json()
     print("\033[94m" + "Body: ", body, "\033[0m")
+
+    pdf_name = body.get("name", "unknown.pdf")
+    json_name = pdf_name.rsplit(".", 1)[0] + ".json"
+
+    filepath = os.path.join(Directory, json_name)
+
+    with open(filepath, "w",encoding="utf-8") as f:
+        json.dump(body.get("mcqs"), f,ensure_ascii=False ,indent=4)
+    clean_old_files(Directory,max_files=10)
+    return {"ok":True}
+
+# camera online status
+@app.post("/online")
+async def camonline(req: Request):
+    body = await req.json() # This will now work perfectly!
+    print("\033[94m" + "Body: ", body, "\033[0m")
+    return {"ok": True}
+
+DIRECTORY2 = "../questions/"
+os.makedirs(DIRECTORY2, exist_ok=True)
+@app.post("/get-questions")
+async def get_questions(req: Request):
+    body = await req.json()
+
+    pdf_name = body.get("name", "unknown.pdf")
+    json_name = pdf_name.rsplit(".", 1)[0] + ".json"
+
+    filepath = os.path.join(DIRECTORY2, json_name)
+
+    with open(filepath, "w",encoding="utf-8") as f:
+        json.dump(body.get("questions"), f,ensure_ascii=False ,indent=4)
+    clean_old_files(DIRECTORY2,max_files=10)
     return {"ok":True}

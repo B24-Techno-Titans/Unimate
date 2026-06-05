@@ -1,0 +1,57 @@
+{
+    "status": "success",
+    "total_pages": 54,
+    "total_chunks": 45,
+    "mcqs": [
+        {
+            "question": "In a layered architecture, what is the collective term for the rules and conventions used by layer n on one machine to converse with layer n on another machine?",
+            "options": [
+                "Peers",
+                "Nodes",
+                "Protocols",
+                "Entities"
+            ],
+            "answer": "Protocols"
+        },
+        {
+            "question": "Which of the following is a primary function of the OSI Model's Network Layer?",
+            "options": [
+                "Ensures packets arrive at their destination and reassembles out of order messages.",
+                "Controls the physical transmission medium and timing interfaces.",
+                "Controls the operation of the subnet, including routing and congestion.",
+                "Provides an unreliable connection-less protocol for applications."
+            ],
+            "answer": "Controls the operation of the subnet, including routing and congestion."
+        },
+        {
+            "question": "According to the context, which of the following is NOT a function of the OSI Model's Transport Layer?",
+            "options": [
+                "Reliability",
+                "Flow control",
+                "Heterogeneity",
+                "Hiding network details"
+            ],
+            "answer": "Heterogeneity"
+        },
+        {
+            "question": "In the TCP/IP model, which protocol provides an unreliable connection-less service, often used for one-shot, client-server-type request-reply queries where prompt delivery is more important than accurate delivery?",
+            "options": [
+                "TCP",
+                "IP",
+                "UDP",
+                "SMTP"
+            ],
+            "answer": "UDP"
+        },
+        {
+            "question": "What was identified as the 'killer application' that caused the Internet revolution in the early 1990s?",
+            "options": [
+                "ARPANET",
+                "FTP",
+                "The Web",
+                "Email (SMTP)"
+            ],
+            "answer": "The Web"
+        }
+    ]
+}
