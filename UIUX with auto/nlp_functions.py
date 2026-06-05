@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 import logging
+import re
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import wave
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -27,8 +30,10 @@ load_dotenv(_env_path, override=True)
 for _logger_name in ("openai", "httpx", "httpcore"):
     logging.getLogger(_logger_name).setLevel(logging.WARNING)
 
-PIPER_EXE = "/home/unimate/unimate_tts/piper/piper"
-VOICE_MODEL = "/home/unimate/unimate_tts/en_US-hfc_female-medium.onnx"
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_PIPER_DIR = _PROJECT_ROOT / "piper"
+PIPER_EXE = str(_PIPER_DIR / "piper")
+VOICE_MODEL = str(_PIPER_DIR / "en_US-hfc_female-medium.onnx")
 AUDIO_OUTPUT = "default"
 
 _DEFAULT_LED_COLOR = (1.0, 0.0, 1.0)
@@ -53,6 +58,11 @@ PLAYBACK_STOP_TIMEOUT_S = 0.5
 CAPTION_WORD_WIDTH = 10
 CAPTION_AUDIO_LAG_S = 0.4
 
+QUIZ_ANSWER_TIME_LIMIT_S = 60
+QUIZ_RECORD_CHUNK_S = 0.25
+QUIZ_EVAL_MODEL = OPENAI_MODEL
+QUIZ_EVAL_TEMPERATURE = 0.2
+
 PERSONALITY_PROMPT = (
     "You are UniMate, a friendly human like assistant. "
     "Be humanly like you talking to a teenager. "
@@ -71,6 +81,15 @@ recognizer.non_speaking_duration = RECOGNIZER_NON_SPEAKING_DURATION_S
 recognizer.phrase_threshold = RECOGNIZER_PHRASE_THRESHOLD
 recognizer.dynamic_energy_threshold = True
 mic_index = MIC_INDEX
+
+
+def _piper_env() -> dict[str, str]:
+    env = os.environ.copy()
+    existing_library_path = env.get("LD_LIBRARY_PATH")
+    env["LD_LIBRARY_PATH"] = (
+        f"{_PIPER_DIR}:{existing_library_path}" if existing_library_path else str(_PIPER_DIR)
+    )
+    return env
 
 
 @contextmanager
@@ -123,7 +142,7 @@ def speak(text: str) -> None:
         f"{PIPER_EXE} --model {VOICE_MODEL} --output_raw | "
         f"aplay -r 22050 -f S16_LE -t raw -D {AUDIO_OUTPUT}"
     )
-    subprocess.run(command, shell=True)
+    subprocess.run(command, shell=True, env=_piper_env())
 
 
 def listen_for_wake_word() -> None:
@@ -285,6 +304,7 @@ def speak_with_duration(text: str) -> tuple[float, subprocess.Popen | None, str 
             input=clean.encode("utf-8"),
             capture_output=True,
             check=False,
+            env=_piper_env(),
         )
         if piper.returncode != 0:
             raise RuntimeError("Piper TTS failed")
@@ -469,3 +489,143 @@ def run_ask_bunny_session(
     thread = threading.Thread(target=_work, daemon=True)
     thread.start()
     return thread
+
+
+@dataclass
+class QuizEvaluation:
+    score: int
+    feedback: str
+    raw_response: str
+
+
+def _combine_audio_chunks(chunks: list[sr.AudioData]) -> sr.AudioData | None:
+    if not chunks:
+        return None
+    if len(chunks) == 1:
+        return chunks[0]
+    raw = b"".join(chunk.get_raw_data() for chunk in chunks)
+    return sr.AudioData(raw, chunks[0].sample_rate, chunks[0].sample_width)
+
+
+def listen_for_quiz_answer(
+    cancel_event: threading.Event,
+    *,
+    time_limit_s: float = QUIZ_ANSWER_TIME_LIMIT_S,
+) -> str:
+    """Record until time_limit_s or cancel_event (Done). No silence/pause stopping."""
+    deadline = time.monotonic() + max(1.0, float(time_limit_s))
+    chunks: list[sr.AudioData] = []
+
+    with _quiet_microphone(device_index=mic_index) as source:
+        recognizer.adjust_for_ambient_noise(source, duration=COMMAND_AMBIENT_CALIBRATION_S)
+        while time.monotonic() < deadline:
+            if cancel_event.is_set():
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            chunk_s = min(QUIZ_RECORD_CHUNK_S, remaining)
+            if chunk_s < 0.05:
+                break
+            audio = recognizer.record(source, duration=chunk_s)
+            chunks.append(audio)
+            if cancel_event.is_set():
+                break
+
+    combined = _combine_audio_chunks(chunks)
+    if combined is None:
+        return ""
+
+    try:
+        return recognizer.recognize_google(combined).strip()
+    except sr.UnknownValueError:
+        return ""
+    except sr.RequestError as exc:
+        raise RuntimeError(f"Speech API error: {exc}") from exc
+
+
+def _parse_quiz_eval_json(text: str) -> dict[str, object]:
+    text = text.strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def evaluate_quiz_answer(
+    question: str,
+    expected_answer: str,
+    transcript: str,
+) -> QuizEvaluation:
+    """Compare spoken transcript to the reference answer; return score 0-100."""
+    transcript = transcript.strip()
+    if not transcript:
+        return QuizEvaluation(
+            score=0,
+            feedback="No answer detected.",
+            raw_response="",
+        )
+
+    system_msg = (
+        "You grade short essay quiz answers. "
+        "Compare the student's spoken transcript to the expected reference answer. "
+        "Score semantic correctness, not exact wording. "
+        'Return ONLY valid JSON: {"score": <integer 0-100>, "feedback": "<one short sentence>"}'
+    )
+    user_msg = (
+        f"Question:\n{question}\n\n"
+        f"Expected answer:\n{expected_answer}\n\n"
+        f"Student transcript:\n{transcript}"
+    )
+
+    try:
+        response = _openai_client().chat.completions.create(
+            model=QUIZ_EVAL_MODEL,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=QUIZ_EVAL_TEMPERATURE,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+    except Exception as exc:
+        raise RuntimeError(f"OpenAI grading failed: {exc}") from exc
+
+    parsed = _parse_quiz_eval_json(raw)
+    score_raw = parsed.get("score", 0)
+    try:
+        score = int(round(float(score_raw)))
+    except (TypeError, ValueError):
+        score = 0
+    score = max(0, min(100, score))
+    feedback = parsed.get("feedback")
+    feedback_text = feedback.strip() if isinstance(feedback, str) else ""
+    if not feedback_text:
+        feedback_text = "Answer evaluated."
+    return QuizEvaluation(score=score, feedback=feedback_text, raw_response=raw)
+
+
+def run_quiz_answer_pipeline(
+    question: str,
+    expected_answer: str,
+    cancel_event: threading.Event,
+    *,
+    time_limit_s: float = QUIZ_ANSWER_TIME_LIMIT_S,
+) -> tuple[str, QuizEvaluation]:
+    """Record + transcribe + grade in one background call."""
+    transcript = listen_for_quiz_answer(cancel_event, time_limit_s=time_limit_s)
+    evaluation = evaluate_quiz_answer(question, expected_answer, transcript)
+    return transcript, evaluation

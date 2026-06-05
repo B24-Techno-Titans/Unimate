@@ -109,6 +109,7 @@ def temp_to_fan_speed(temp_c: float) -> int:
 
 async def autoFanSpeed():
     global auto_fan_on, _current_fan_speed
+    auto_fan_on = True
     while auto_fan_on:
         temp_c = TempSensor.get_temp()
         speed = temp_to_fan_speed(temp_c)
@@ -116,10 +117,12 @@ async def autoFanSpeed():
             control_fan(speed)
             _current_fan_speed = speed
 
+        print("Current fan speed: ", _current_fan_speed)
         await asyncio.sleep(2)
 
 
 def stopAutoFanSpeed():
-    global auto_fan_on
+    global auto_fan_on, _current_fan_speed
     auto_fan_on = False
+    _current_fan_speed = 0
 

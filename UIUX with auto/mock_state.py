@@ -28,6 +28,9 @@ class MockState:
     led_on: bool = False
     led_brightness: float = 0.65
     led_color: tuple[float, float, float] = (0.15, 0.92, 1.0)  # face cyan #00E5FF
+    auto_fan: bool = False
+    auto_humidifier: bool = False
+    auto_light: bool = False
 
     def set_fan_off(self) -> None:
         self.fan_level = 0

@@ -42,7 +42,7 @@ def fetch_sensor_data():
     
     try:
         # Use a timeout to prevent the script from hanging forever
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, timeout=2)
         
         if response.status_code == 200:
             # Parse the JSON response

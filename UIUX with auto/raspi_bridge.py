@@ -10,7 +10,7 @@ from typing import Any
 import requests
 
 DEFAULT_BASE_URL = "http://127.0.0.1:5000"
-REQUEST_TIMEOUT_S = 4.0
+REQUEST_TIMEOUT_S = 5.0
 
 
 def _base_url() -> str:
@@ -113,14 +113,17 @@ def fetch_sensors() -> SensorReadings | None:
     return parse_sensor_payload(data)
 
 
-def set_fan(level: int) -> bool:
+def set_fan(level: int, *, auto_fan: bool = False) -> bool:
     level = max(0, min(2, int(level)))
-    return _post("/set-fan", {"fanSpeed": level})
+    if auto_fan:
+        return _post("/set-fan", {"autoFan": True})
+    else:
+        return _post("/set-fan", {"fanSpeed": level, "autoFan": False})
 
 
-def set_humidifier(level: int) -> bool:
+def set_humidifier(level: int, *, auto_humid: bool = False) -> bool:
     level = max(0, min(2, int(level)))
-    return _post("/set-humid", {"level": level})
+    return _post("/set-humid", {"level": level, "autoHumid": bool(auto_humid)})
 
 
 def rgb_tuple_to_hex(rgb: tuple[float, float, float]) -> str:
@@ -161,7 +164,12 @@ def apply_led_state(
     led_on: bool,
     led_brightness: float,
     led_color: tuple[float, float, float],
+    auto_light: bool = False,
 ) -> bool:
     """Push ambient light state via /set-lights (brightness 0 when off)."""
     brightness = int(round(led_brightness * 255)) if led_on else 0
-    return set_lights(rgb_hex=rgb_tuple_to_hex(led_color), brightness=brightness)
+    return set_lights(
+        rgb_hex=rgb_tuple_to_hex(led_color),
+        brightness=brightness,
+        auto_light=auto_light,
+    )
