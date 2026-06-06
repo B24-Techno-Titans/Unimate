@@ -280,3 +280,19 @@ async def get_questions(req: Request):
         json.dump(body.get("questions"), f,ensure_ascii=False ,indent=4)
     clean_old_files(DIRECTORY2,max_files=10)
     return {"ok":True}
+
+DIRECTORY3 = "../summaries/"
+os.makedirs(DIRECTORY3, exist_ok=True)
+@app.post("/summary")
+async def summary(req: Request):
+    body = await req.json()
+
+    pdf_name = body.get("name", "unknown.pdf")
+    json_name = pdf_name.rsplit(".", 1)[0] + ".json"
+
+    filepath = os.path.join(DIRECTORY3, json_name)
+
+    with open(filepath, "w",encoding="utf-8") as f:
+        json.dump(body.get("summary"), f,ensure_ascii=False ,indent=4)
+    clean_old_files(DIRECTORY3,max_files=10)
+    return {"ok":True}
