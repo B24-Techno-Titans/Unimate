@@ -13,6 +13,8 @@ import re
 import json
 
 is_speaking = asyncio.Event()
+session_active = False
+VOICE_TRIGGER_PATH = os.path.join(os.path.dirname(__file__), "voice_trigger.json")
 load_dotenv(override=True)
 api_key = os.getenv("GEMINI_API_KEY")
 
@@ -102,11 +104,30 @@ def flush_input_stream():
         pass
 
 
-def listen_for_wake_word() -> list:
-    """Block until wake word detected. Returns pre_buffer list."""
+def read_voice_trigger() -> bool:
+    try:
+        with open(VOICE_TRIGGER_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return bool(data.get("trigger"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+
+
+def clear_voice_trigger() -> None:
+    payload = {"trigger": False, "requested_at": None}
+    try:
+        with open(VOICE_TRIGGER_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+            f.write("\n")
+    except OSError as e:
+        print(f"Error clearing voice trigger: {e}")
+
+
+def listen_for_wake_word_or_trigger() -> list:
+    """Block until wake word or UI trigger detected. Returns pre_buffer list."""
     global input_stream
 
-    print("Listening for wake word 'bunny'...")
+    print("Listening for wake word 'bunny' or UI trigger...")
 
     # ── Flush stale audio left over from the previous session ─────────
     flush_input_stream()
@@ -135,6 +156,13 @@ def listen_for_wake_word() -> list:
 
         audio_np = np.frombuffer(audio_data, dtype=np.int16)
         pre_buffer.append(audio_data)
+
+        if not session_active and read_voice_trigger():
+            clear_voice_trigger()
+            print("Session triggered via UI button")
+            play_beep()
+            return list(pre_buffer)
+
         predictions = wake_model.predict(audio_np)
 
         for word, score in predictions.items():
@@ -283,6 +311,8 @@ async def audio_output(session, stop_event: asyncio.Event):
 
 
 async def run_session(pre_buffer: list):
+    global session_active
+    session_active = True
     is_speaking.clear()
 
     dynamic_instruction =bot_instruction
@@ -356,15 +386,20 @@ async def run_session(pre_buffer: list):
 
     except Exception as e:
         print(f"Failed to connect or session error: {e}")
+    finally:
+        session_active = False
+        clear_voice_trigger()
 
 async def main():
+    clear_voice_trigger()
     while True:
-        print("\n--- Waiting for wake word ---")
+        print("\n--- Waiting for wake word or UI trigger ---")
 
-        # listen_for_wake_word is blocking — run in thread so asyncio stays alive
-        pre_buffer = await asyncio.to_thread(listen_for_wake_word)
+        # listen_for_wake_word_or_trigger is blocking — run in thread so asyncio stays alive
+        pre_buffer = await asyncio.to_thread(listen_for_wake_word_or_trigger)
 
         await run_session(pre_buffer)
+        clear_voice_trigger()
 
         print("Session ended. Restarting wake word detection...")
         play_beep(frequency=440, duration=0.15)  # lower beep = session end signal

@@ -329,6 +329,7 @@ _QUESTIONS_MAX_FILES = 10
 _SUMMARIES_DIR = Path(__file__).resolve().parent.parent / "summaries"
 _SUMMARIES_MAX_FILES = 10
 _PDF_MODE_STATUS_PATH = Path(__file__).resolve().parent.parent / "pdf_mode" / "pdf_mode_status.json"
+_VOICE_TRIGGER_PATH = Path(__file__).resolve().parent.parent / "alexa" / "voice_trigger.json"
 
 _MCQ_LETTERS = ("A", "B", "C", "D")
 
@@ -543,6 +544,18 @@ def _write_pdf_mode_status(context: str, active: bool) -> None:
         )
     except OSError as exc:
         print(f"[dashboard] pdf_mode status write error: {exc}")
+
+
+def _write_voice_trigger(trigger: bool) -> None:
+    payload = {"trigger": trigger, "requested_at": time.time() if trigger else None}
+    try:
+        _VOICE_TRIGGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _VOICE_TRIGGER_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        print(f"[dashboard] voice trigger write error: {exc}")
 
 
 def _rgba_to_markup_color(rgba: tuple[float, float, float, float]) -> str:
@@ -5075,11 +5088,16 @@ def build_study_screen() -> Screen:
             background_color=Theme.PANEL,
         )
 
+        def _on_ask_questions(*_a) -> None:
+            _write_voice_trigger(True)
+
         def _close_viewer(*_a) -> None:
+            _write_voice_trigger(False)
             _write_pdf_mode_status(summary_viewer_context, False)
             if summary_viewer_popup is not None:
                 summary_viewer_popup.dismiss()
 
+        ask_btn.bind_safe_press(_on_ask_questions)
         _bind_touch_safe_on_press(close_btn, _close_viewer)
         _sync_body_layout(body_lbl)
         summary_viewer_popup.open()
