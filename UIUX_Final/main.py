@@ -71,6 +71,8 @@ from dashboard import (  # noqa: E402
 )
 from mock_state import MockState  # noqa: E402
 from raspi_bridge import SensorReadings, fetch_sensors  # noqa: E402
+from emotions.morph import RoboMorphWidget  # noqa: E402
+from emotions.selector import build_emotion_screen  # noqa: E402
 from robo_eyes import RoboEyesWidget, schedule_random_idle_charm  # noqa: E402
 from theme import Theme  # noqa: E402
 
@@ -103,17 +105,19 @@ def _silence_probesysfs_xinput_warnings() -> None:
 
 _silence_probesysfs_xinput_warnings()
 
-SCREEN_ORDER = ("study", "face", "sensors", "controls")
+SCREEN_ORDER = ("study", "face", "emotion", "sensors", "controls")
 
-# Touch: Study → Face → Sensors → Controls. Finger swipe left (dx < 0) → next; right → previous.
+# Touch: Study ← Face → Emotion → Sensors → Controls. Swipe left (dx < 0) → next; right → previous.
 _SWIPE_PREV = {
     "face": "study",
-    "sensors": "face",
+    "emotion": "face",
+    "sensors": "emotion",
     "controls": "sensors",
 }
 _SWIPE_NEXT = {
     "study": "face",
-    "face": "sensors",
+    "face": "emotion",
+    "emotion": "sensors",
     "sensors": "controls",
 }
 
@@ -121,7 +125,7 @@ IDLE_FACE_TIMEOUT_S = 120.0
 
 
 class FourScreenSwipeManager(ScreenManager):
-    """Horizontal swipe matching UIUX watch flow: Study—Face—Sensors—Controls (no chrome)."""
+    """Horizontal swipe: Study—Face—Emotion—Sensors—Controls (no chrome)."""
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -179,7 +183,9 @@ class UniMateKivyUI(BoxLayout):
         self.manager.add_widget(study)
 
         self.eyes_widget = RoboEyesWidget()
+        self.morph_widget = RoboMorphWidget()
         self.manager.add_widget(self._face_screen())
+        self.manager.add_widget(build_emotion_screen(self.morph_widget))
 
         sensors, srefs = build_sensors_screen(self.state)
         self.sensors_refs = srefs
@@ -263,8 +269,13 @@ class UniMateKivyUI(BoxLayout):
         cur = self.manager.current
         if cur == "face":
             self.eyes_widget.start()
+            self.morph_widget.stop()
+        elif cur == "emotion":
+            self.eyes_widget.stop()
+            self.morph_widget.start()
         else:
             self.eyes_widget.stop()
+            self.morph_widget.stop()
 
     def _on_user_activity(self, *_args) -> bool:
         self._reset_idle_timer()

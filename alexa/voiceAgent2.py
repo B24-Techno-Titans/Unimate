@@ -373,14 +373,24 @@ async def run_session(pre_buffer: list):
                 print("Stop event fired — cancelling tasks...")
                 input_task.cancel()
                 output_task.cancel()
+            
+            async def ui_trigger_watchdog():
+                while not stop_event.is_set():
+                    await asyncio.sleep(0.5) 
+                    if read_voice_trigger(): 
+                        print("🔄 [UI TRIGGER DETECTED MID-SESSION] New PDF or request from App! Restarting session...")
+                        stop_event.set() 
+                        break
 
             watchdog_task = asyncio.create_task(watchdog())
+            ui_trigger_task = asyncio.create_task(ui_trigger_watchdog())
 
             try:
                 await asyncio.gather(input_task, output_task, return_exceptions=True)
             finally:
                 watchdog_task.cancel()
-                await asyncio.gather(watchdog_task, return_exceptions=True)
+                ui_trigger_task.cancel()
+                await asyncio.gather(watchdog_task,ui_trigger_task, return_exceptions=True)
                 is_speaking.clear()
                 print("Session cleaned up.")
 
