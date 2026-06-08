@@ -177,7 +177,6 @@ def listen_for_wake_word_or_trigger() -> list:
         predictions = wake_model.predict(audio_np)
 
         for word, score in predictions.items():
-            print({score})
             if score > 0.3:
                 print(f"Wake word detected! ({word}: {score:.2f})")
                 play_beep()
@@ -249,9 +248,7 @@ def handle_device_command(cmd_string: str):
         try:
             if action == "on":
                 print("Turning LIGHT ON")
-               
                 requests.get(LED_ON_URL, timeout=3)
-                    
             else:
                 print("Turning LIGHT OFF")
                 requests.get(LED_OFF_URL, timeout=3)
@@ -309,7 +306,6 @@ async def audio_input(session, stop_event: asyncio.Event, pre_buffer: list):
 
 
 async def audio_output(session, stop_event: asyncio.Event):
-    accumulated_model_text=[]
     try:
         while not stop_event.is_set():
             async for response in session.receive():
@@ -323,13 +319,12 @@ async def audio_output(session, stop_event: asyncio.Event):
                 if server_content.input_transcription and server_content.input_transcription.text:
                     user_text = server_content.input_transcription.text
                     print(f"User said: {user_text!r}", flush=True)
-                    # handle_device_command(user_text)
+                    handle_device_command(user_text)
 
                 if server_content.output_transcription and server_content.output_transcription.text:
                     model_text = server_content.output_transcription.text
                     print(f"Model said: {model_text!r}", flush=True)
-                    accumulated_model_text.append(model_text)
-                    # handle_device_command(model_text)
+                    handle_device_command(model_text)
 
                 if server_content.model_turn is not None:
                     for part in server_content.model_turn.parts:
@@ -338,23 +333,17 @@ async def audio_output(session, stop_event: asyncio.Event):
                             await asyncio.to_thread(output_stream.write, part.inline_data.data)
                         if part.text:
                             print(f"Text: {part.text!r}", flush=True)
-                            # handle_device_command(part.text)
-                            accumulated_model_text.append(part.text)
+                            handle_device_command(part.text)
 
                 if server_content.turn_complete:
                     is_speaking.clear()
                     print("Finished speaking.")
-                    full_text = " ".join(accumulated_model_text)
-                    accumulated_model_text.clear()
-                    if full_text:
-                        handle_device_command(full_text)
 
     except asyncio.CancelledError:
         pass
     except Exception as e:
         print(f"Error in audio_output: {e}")
 
-ui_restart_requested = False
 
 async def run_session(pre_buffer: list):
     global session_active
@@ -421,13 +410,11 @@ async def run_session(pre_buffer: list):
                 output_task.cancel()
             
             async def ui_trigger_watchdog():
-                global ui_restart_requested
                 while not stop_event.is_set():
-                    await asyncio.sleep(0.5)
-                    if read_voice_trigger():
-                        print("🔄 [UI TRIGGER] Stopping current session to restart...")
-                        ui_restart_requested = True   # signal main() to skip wake word wait
-                        stop_event.set()
+                    await asyncio.sleep(0.5) 
+                    if read_voice_trigger(): 
+                        print("🔄 [UI TRIGGER DETECTED MID-SESSION] New PDF or request from App! Restarting session...")
+                        stop_event.set() 
                         break
 
             watchdog_task = asyncio.create_task(watchdog())
@@ -438,7 +425,7 @@ async def run_session(pre_buffer: list):
             finally:
                 watchdog_task.cancel()
                 ui_trigger_task.cancel()
-                await asyncio.gather(watchdog_task,ui_trigger_task ,return_exceptions=True)
+                await asyncio.gather(watchdog_task,ui_trigger_task, return_exceptions=True)
                 is_speaking.clear()
                 print("Session cleaned up.")
 
@@ -449,26 +436,20 @@ async def run_session(pre_buffer: list):
         clear_voice_trigger()
 
 async def main():
-    global ui_restart_requested
     clear_voice_trigger()
     while True:
         print("\n--- Waiting for wake word or UI trigger ---")
 
-        if ui_restart_requested:
-            # Skip wake word listening — go straight to new session
-            print("UI restart: skipping wake word, starting session immediately...")
-            ui_restart_requested = False
-            clear_voice_trigger()
-            pre_buffer = []
-        else:
-            pre_buffer = await asyncio.to_thread(listen_for_wake_word_or_trigger)
+        # listen_for_wake_word_or_trigger is blocking — run in thread so asyncio stays alive
+        pre_buffer = await asyncio.to_thread(listen_for_wake_word_or_trigger)
 
         await run_session(pre_buffer)
         clear_voice_trigger()
 
         print("Session ended. Restarting wake word detection...")
-        play_beep(frequency=440, duration=0.15)
-        await asyncio.sleep(0.5)
+        play_beep(frequency=440, duration=0.15)  # lower beep = session end signal
+        await asyncio.sleep(0.5)  # short pause before re-listening
+
 
 if __name__ == "__main__":
     try:
