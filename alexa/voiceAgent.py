@@ -230,18 +230,6 @@ def play_beep(frequency=880, duration=0.2, volume=0.5):
     wave = (np.sin(2 * np.pi * frequency * t) * volume * 32767).astype(np.int16)
     output_stream.write(wave.tobytes())
 
-def handle_emotion_command(text: str):
-    pattern = r"\[CMD:emotion=(happy|sad|angry)\]"
-    match = re.search(pattern, text, flags=re.IGNORECASE)
-    if match:
-        emotion = match.group(1).lower()
-        print(f"[EMOTION]: {emotion}")
-        try:
-            with open("./emotion_state.json", "w") as f:
-                json.dump({"emotion": emotion, "timestamp": time.time()}, f)
-        except OSError as e:
-            print(f"Failed to write emotion: {e}")
-
 
 def extract_device_command(text: str):
     if not text:
@@ -389,7 +377,6 @@ async def audio_output(session, stop_event: asyncio.Event):
                     accumulated_model_text.clear()
                     if full_text:
                         handle_device_command(full_text)
-                        handle_emotion_command(full_text)
 
     except asyncio.CancelledError:
         pass
