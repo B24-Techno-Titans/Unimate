@@ -10,8 +10,9 @@ import time
 import sys
 from pathlib import Path
 import os
+from Livefeed.live import toggle_live_feed
 
-from fastapi import FastAPI,Request
+from fastapi import FastAPI,Request,BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Any
 
@@ -259,10 +260,40 @@ async def mcqs(req:Request):
     return {"ok":True}
 
 # camera online status
+cam_running = False
+
+async def camera_loop():
+    global cam_running
+    while cam_running:
+        print("Camera loop iteration. cam_running =", cam_running)
+        toggle_live_feed("on")
+        await asyncio.sleep(1)  
+    
+  
+    toggle_live_feed("off") 
+    print("Camera loop stopped completely.")
+
 @app.post("/online")
-async def camonline(req: Request):
-    body = await req.json() # This will now work perfectly!
+async def camonline(req: Request, background_tasks: BackgroundTasks): # 🚨 මෙතනට background_tasks එක ඇතුලත් කළා
+    global cam_running
+    
+    body = await req.json()
     print("\033[94m" + "Body: ", body, "\033[0m")
+    
+    
+    requested_status = body.get("requesting_toggle", False) 
+    
+    if requested_status:
+        if not cam_running: 
+            cam_running = True
+            background_tasks.add_task(camera_loop)
+            print("Camera loop started in background.")
+        else:
+            print("Camera loop is already running.")
+    else:
+        cam_running = False
+        print("Camera loop will stop after current iteration.")
+        
     return {"ok": True}
 
 DIRECTORY2 = "../questions/"
