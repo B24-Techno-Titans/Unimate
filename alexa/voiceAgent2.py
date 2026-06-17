@@ -100,11 +100,11 @@ bot_instruction = """
     Never speak any command tags out loud — they are silent metadata only.
     If no device control is needed, do not emit any hardware command tag.
 
-    - Note to model: The user might speak or ask questions in a mix of English and Sinhala (Singlish). Respond naturally in the same language style they use, while strictly keeping the cute persona and mood constraints.
+    - Note to model: The user might speak or ask questions in a mix of English and Sinhala (Singlish) or any other language. Respond naturally in the same language style they use, while strictly keeping the cute persona and mood constraints.
     """
 
 SILENCE_TIMEOUT = 15
-SILENCE_THRESHOLD = 500
+SILENCE_THRESHOLD = 600
 PRE_BUFFER_SECONDS = 2
 
 FORMAT   = pyaudio.paInt16
@@ -112,8 +112,9 @@ CHANNELS = 1
 RATE     = 16000
 CHUNK    = 1280
 
-model_path = "bunny_work.onnx"
-wake_model = Model(wakeword_model_paths=[model_path])  # ← fixed parameter name
+import pathlib
+model_path = pathlib.Path(__file__).parent / "bunny_work.onnx"
+wake_model = Model(wakeword_model_paths=[str(model_path)])  # ← fixed parameter name
 
 # ── PyAudio is created once; streams are recreated each session ────────────────
 p = pyaudio.PyAudio()

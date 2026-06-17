@@ -5,6 +5,7 @@ import board
 from adafruit_pca9685 import PCA9685
 from adafruit_motor import servo
 import time
+from pathlib import Path
 
 # ------------------------------
 # SERVO + PCA9685 INITIALIZATION
@@ -36,9 +37,8 @@ print("Pi Camera Face Tracking started – press 'q' to quit")
 # ------------------------------
 # FACE DETECTOR
 # ------------------------------
-face_cascade = cv2.CascadeClassifier(
-    "/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml"
-)
+CASCADE_PATH = Path(__file__).resolve().parent / "haarcascades" / "haarcascade_frontalface_default.xml"
+face_cascade = cv2.CascadeClassifier(str(CASCADE_PATH))
 
 # ------------------------------
 # CONSTANTS

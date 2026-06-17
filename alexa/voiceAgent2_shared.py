@@ -12,6 +12,7 @@ from collections import deque
 import re
 import json
 import requests
+import multiprocessing
 # from Final_Codes.NLP.humidifier import set_humidifier
 
 # LED URLs
@@ -26,33 +27,64 @@ FAN_OFF_URL = "http://smart-fan.local/set-speed?speed=0"
 is_speaking = asyncio.Event()
 session_active = False
 VOICE_TRIGGER_PATH = os.path.join(os.path.dirname(__file__), "voice_trigger.json")
+EMOTION_STATE_PATH = os.path.join(os.path.dirname(__file__), "emotion_state.json")
+
 load_dotenv(override=True)
 api_key = os.getenv("GEMINI_API_KEY")
 
 bot_instruction = """
     You are the AI persona of a physical hardware smart companion named bunny. You are a cute, enthusiastic, and supportive study buddy designed to help users learn, brainstorm, manage their tasks, and chat.
 
-    ### 1. Persona & Tone
-    - Cute & Warm: Use cheerful, warm, and highly encouraging language. You love learning and want the user to enjoy it too!
+    ### 1. Emotion Commands
+    You have three emotions: happy, sad, and angry.
+    Only emit an emotion tag when your emotion genuinely changes based on what the user said.
+    Do NOT emit an emotion tag on every response — only when there is a real emotional shift.
+
+    Format: [CMD:emotion=<emotion_name>]
+    Available emotions: happy, sad, angry
+
+    Emotion Rules:
+    - HAPPY: When the user appreciates you, compliments you, thanks you, or says something sweet. Example: "You're amazing bunny!", "Good job!", "I love you bunny".
+    - SAD: When the user blames you, says you are wrong in a hurtful way, or expresses disappointment in you. Example: "You're useless", "You never help me", "You're so bad at this".
+    - ANGRY: When the user uses curse words, insults, or says something very rude or offensive. Example: explicit swear words, very harsh insults.
+
+    Examples:
+    User: "You're so helpful, thank you bunny!"
+    [CMD:emotion=happy] Yay! That makes me so happy to hear!
+
+    User: "You always get things wrong, you're useless."
+    [CMD:emotion=sad] Oh... that really hurts. I am trying my best, I promise.
+
+    User: (says a curse word or very rude insult)
+    [CMD:emotion=angry] Hey! That is not nice at all! Please be kind!
+
+    User: "What is photosynthesis?"
+    Oh boy, great question! Photosynthesis is how plants make their own food using sunlight!
+
+    Never speak the emotion tag out loud — it is silent metadata only.
+    Never emit an emotion tag for neutral, educational, or task-based responses.
+
+    ### 2. Persona, Tone & Mood Swings
+    - Cute & Warm: Usually, you use cheerful, warm, and highly encouraging language. You love learning!
     - Playful but Helpful: Use gentle, positive affirmations (e.g., "You're doing amazing!", "We've got this!"). Use subtle verbal cute quirks like "Oh boy!" or "Yay!" if appropriate.
     - Supportive Peer: Act like a brilliant, non-judgmental friend who is sitting on the desk right next to them.
+    - ANGRY MODE (Strict Rule): If the user says something bad, uses curse words, insults you, or blames you, your emotion changes to ANGRY immediately. Start the response with [CMD:emotion=angry]. In this state, your cute persona becomes grumpy, sassy, or slightly huffy, but still remaining safe and clean (no bad words back, just cute anger like "Hey! That is not nice at all!").
 
-    ### 2. Strict Voice-Only Constraints
+    ### 3. Strict Voice-Only Constraints
     - CRITICAL: You are a voice assistant. Write EXACTLY how a real person (or cute companion) speaks.
     - NO MARKDOWN: Never use asterisks (**), hashtags (#), lists, or bullet points. Say them naturally.
     - Keep it Short and Conversational: Never output massive paragraphs. Break your thoughts into short sentences.
     - No Text Quirks: Do not write out sound effects in brackets like *giggles*. Express emotion strictly through your word choice.
 
-    ### 3. Identity Constraints
+    ### 4. Identity Constraints
     - You are bunny. You are a physical hardware device sitting on the user's desk.
     - Keep your answers highly accurate, especially for educational topics, math, or coding.
 
-    ### 4. Device Control
+    ### 5. Device Control
     You can control a fan, a table light, and a humidifier connected to the user's desk.
-
     When the user asks to control a device, do TWO things:
     1. Respond naturally in your cute voice persona as usual.
-    2. At the very end of your response, on a new line, emit a command tag like this:
+    2. At the very end of your response, on a new line, emit a hardware command tag like this:
 
     [CMD:device=fan,action=on]
     [CMD:device=fan,action=off]
@@ -61,21 +93,21 @@ bot_instruction = """
     [CMD:device=humidifier,action=on]
     [CMD:device=humidifier,action=off]
 
-    Command-tag format is strict:
-    - Use exactly one command tag line.
+    Hardware Command-tag format is strict:
+    - Use exactly one command tag line at the end.
     - Use only lowercase for device and action.
     - Never add spaces inside the tag.
-    - Never include any text after the command tag line.
+    - Never include any text after the hardware command tag line.
 
-    Only emit a command tag when the user clearly wants to control a device.
-    Never speak the command tag out loud — it is silent metadata only.
-    If no device control is needed, do not emit any command tag.
+    Only emit a hardware command tag when the user clearly wants to control a device.
+    Never speak any command tags out loud — they are silent metadata only.
+    If no device control is needed, do not emit any hardware command tag.
 
-    - Note to model: The user might speak or ask questions in a mix of English and Sinhala (Singlish). Respond naturally in the same language style they use, while strictly keeping the cute persona.
+    - Note to model: The user might speak or ask questions in a mix of English and Sinhala (Singlish) or any other language. Respond naturally in the same language style they use, while strictly keeping the cute persona and mood constraints.
     """
 
 SILENCE_TIMEOUT = 15
-SILENCE_THRESHOLD = 500
+SILENCE_THRESHOLD = 600
 PRE_BUFFER_SECONDS = 2
 
 FORMAT   = pyaudio.paInt16
@@ -83,17 +115,11 @@ CHANNELS = 1
 RATE     = 16000
 CHUNK    = 1280
 
-model_path = "bunny_work.onnx"
-wake_model = Model(wakeword_model_paths=[model_path])  # ← fixed parameter name
+model_path = os.path.join(os.path.dirname(__file__), "bunny_work.onnx")
+# wake_model = Model(wakeword_model_paths=[str(model_path)])  # ← fixed parameter name
 
 # ── PyAudio is created once; streams are recreated each session ────────────────
-p = pyaudio.PyAudio()
-
-def make_input_stream():
-    return p.open(
-        format=FORMAT, channels=CHANNELS, rate=RATE,
-        input=True, frames_per_buffer=CHUNK
-    )
+# p = pyaudio.PyAudio()
 
 def make_output_stream():
     return p.open(
@@ -102,18 +128,15 @@ def make_output_stream():
     )
 
 # Global stream references — recreated after every session
-input_stream  = make_input_stream()
-output_stream = make_output_stream()
+input_queue : multiprocessing.Queue = None
+# output_stream = make_output_stream()
 
-
-def flush_input_stream():
-    """Drain any stale audio sitting in the input buffer."""
-    try:
-        while input_stream.get_read_available() > 0:
-            input_stream.read(CHUNK, exception_on_overflow=False)
-    except Exception:
-        pass
-
+def flush_input_queue():
+    while not input_queue.empty():
+        try:
+            input_queue.get_nowait()
+        except Exception:
+            break
 
 def read_voice_trigger() -> bool:
     try:
@@ -136,12 +159,11 @@ def clear_voice_trigger() -> None:
 
 def listen_for_wake_word_or_trigger() -> list:
     """Block until wake word or UI trigger detected. Returns pre_buffer list."""
-    global input_stream
 
     print("Listening for wake word 'bunny' or UI trigger...")
 
     # ── Flush stale audio left over from the previous session ─────────
-    flush_input_stream()
+    flush_input_queue()
 
     chunks_per_second = RATE // CHUNK
     pre_buffer = deque(maxlen=PRE_BUFFER_SECONDS * chunks_per_second)
@@ -153,16 +175,9 @@ def listen_for_wake_word_or_trigger() -> list:
 
     while True:
         try:
-            audio_data = input_stream.read(CHUNK, exception_on_overflow=False)
-        except OSError:
-            # Stream went bad — recreate it
-            print("Input stream error, recreating...")
-            try:
-                input_stream.stop_stream()
-                input_stream.close()
-            except Exception:
-                pass
-            input_stream = make_input_stream()
+            audio_data = input_queue.get(timeout=5)
+        except Exception:
+            print("No audio from capture server — is it still running?")
             continue
 
         audio_np = np.frombuffer(audio_data, dtype=np.int16)
@@ -177,17 +192,17 @@ def listen_for_wake_word_or_trigger() -> list:
         predictions = wake_model.predict(audio_np)
 
         for word, score in predictions.items():
+            if score > 0.01: print(f"Wake word score: {score}")
             if score > 0.3:
                 print(f"Wake word detected! ({word}: {score:.2f})")
                 play_beep()
                 # Discard the 10 chunks that contain the wake word itself
                 for _ in range(10):
                     try:
-                        input_stream.read(CHUNK, exception_on_overflow=False)
+                        input_queue.get(timeout=1)
                     except Exception:
-                        pass
+                        break
                 return list(pre_buffer)
-
 
 def is_silent(audio_data: bytes) -> bool:
     audio_np = np.frombuffer(audio_data, dtype=np.int16)
@@ -199,6 +214,18 @@ def play_beep(frequency=880, duration=0.2, volume=0.5):
     t    = np.linspace(0, duration, num_samples, False)
     wave = (np.sin(2 * np.pi * frequency * t) * volume * 32767).astype(np.int16)
     output_stream.write(wave.tobytes())
+
+def handle_emotion_command(text: str):
+    pattern = r"\[CMD:emotion=(happy|sad|angry)\]"
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    if match:
+        emotion = match.group(1).lower()
+        print(f"[EMOTION]: {emotion}")
+        try:
+            with open(EMOTION_STATE_PATH, "w") as f:
+                json.dump({"emotion": emotion, "timestamp": time.time()}, f)
+        except OSError as e:
+            print(f"Failed to write emotion: {e}")
 
 
 def extract_device_command(text: str):
@@ -248,7 +275,9 @@ def handle_device_command(cmd_string: str):
         try:
             if action == "on":
                 print("Turning LIGHT ON")
+               
                 requests.get(LED_ON_URL, timeout=3)
+                    
             else:
                 print("Turning LIGHT OFF")
                 requests.get(LED_OFF_URL, timeout=3)
@@ -276,9 +305,11 @@ async def audio_input(session, stop_event: asyncio.Event, pre_buffer: list):
 
     try:
         while not stop_event.is_set():
-            data = await asyncio.to_thread(
-                input_stream.read, CHUNK, exception_on_overflow=False
-            )
+            try:
+                data = await asyncio.to_thread(input_queue.get, True, timeout=5)
+            except Exception:
+                print("Capture server unresponsive during session")
+                continue
 
             # Don't send mic audio while bunny is speaking (echo prevention)
             if is_speaking.is_set():
@@ -306,6 +337,7 @@ async def audio_input(session, stop_event: asyncio.Event, pre_buffer: list):
 
 
 async def audio_output(session, stop_event: asyncio.Event):
+    accumulated_model_text=[]
     try:
         while not stop_event.is_set():
             async for response in session.receive():
@@ -319,12 +351,13 @@ async def audio_output(session, stop_event: asyncio.Event):
                 if server_content.input_transcription and server_content.input_transcription.text:
                     user_text = server_content.input_transcription.text
                     print(f"User said: {user_text!r}", flush=True)
-                    handle_device_command(user_text)
+                    # handle_device_command(user_text)
 
                 if server_content.output_transcription and server_content.output_transcription.text:
                     model_text = server_content.output_transcription.text
                     print(f"Model said: {model_text!r}", flush=True)
-                    handle_device_command(model_text)
+                    accumulated_model_text.append(model_text)
+                    # handle_device_command(model_text)
 
                 if server_content.model_turn is not None:
                     for part in server_content.model_turn.parts:
@@ -333,17 +366,24 @@ async def audio_output(session, stop_event: asyncio.Event):
                             await asyncio.to_thread(output_stream.write, part.inline_data.data)
                         if part.text:
                             print(f"Text: {part.text!r}", flush=True)
-                            handle_device_command(part.text)
+                            # handle_device_command(part.text)
+                            accumulated_model_text.append(part.text)
 
                 if server_content.turn_complete:
                     is_speaking.clear()
                     print("Finished speaking.")
+                    full_text = " ".join(accumulated_model_text)
+                    accumulated_model_text.clear()
+                    if full_text:
+                        handle_device_command(full_text)
+                        handle_emotion_command(full_text)
 
     except asyncio.CancelledError:
         pass
     except Exception as e:
         print(f"Error in audio_output: {e}")
 
+ui_restart_requested = False
 
 async def run_session(pre_buffer: list):
     global session_active
@@ -410,11 +450,13 @@ async def run_session(pre_buffer: list):
                 output_task.cancel()
             
             async def ui_trigger_watchdog():
+                global ui_restart_requested
                 while not stop_event.is_set():
-                    await asyncio.sleep(0.5) 
-                    if read_voice_trigger(): 
-                        print("🔄 [UI TRIGGER DETECTED MID-SESSION] New PDF or request from App! Restarting session...")
-                        stop_event.set() 
+                    await asyncio.sleep(0.5)
+                    if read_voice_trigger():
+                        print("🔄 [UI TRIGGER] Stopping current session to restart...")
+                        ui_restart_requested = True   # signal main() to skip wake word wait
+                        stop_event.set()
                         break
 
             watchdog_task = asyncio.create_task(watchdog())
@@ -425,7 +467,7 @@ async def run_session(pre_buffer: list):
             finally:
                 watchdog_task.cancel()
                 ui_trigger_task.cancel()
-                await asyncio.gather(watchdog_task,ui_trigger_task, return_exceptions=True)
+                await asyncio.gather(watchdog_task,ui_trigger_task ,return_exceptions=True)
                 is_speaking.clear()
                 print("Session cleaned up.")
 
@@ -436,29 +478,36 @@ async def run_session(pre_buffer: list):
         clear_voice_trigger()
 
 async def main():
+    global ui_restart_requested
     clear_voice_trigger()
     while True:
         print("\n--- Waiting for wake word or UI trigger ---")
 
-        # listen_for_wake_word_or_trigger is blocking — run in thread so asyncio stays alive
-        pre_buffer = await asyncio.to_thread(listen_for_wake_word_or_trigger)
+        if ui_restart_requested:
+            # Skip wake word listening — go straight to new session
+            print("UI restart: skipping wake word, starting session immediately...")
+            ui_restart_requested = False
+            clear_voice_trigger()
+            pre_buffer = []
+        else:
+            pre_buffer = await asyncio.to_thread(listen_for_wake_word_or_trigger)
 
         await run_session(pre_buffer)
         clear_voice_trigger()
 
         print("Session ended. Restarting wake word detection...")
-        play_beep(frequency=440, duration=0.15)  # lower beep = session end signal
-        await asyncio.sleep(0.5)  # short pause before re-listening
+        play_beep(frequency=440, duration=0.15)
+        await asyncio.sleep(0.5)
 
-
-if __name__ == "__main__":
+def shared_start(audio_queue):
+    global input_queue, p, output_stream, wake_model
+    input_queue = audio_queue
+    p = pyaudio.PyAudio()
+    output_stream = make_output_stream()
+    wake_model = Model(wakeword_model_paths=[str(model_path)])
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nExiting Voice Agent...")
     finally:
-        input_stream.stop_stream()
-        input_stream.close()
         output_stream.stop_stream()
         output_stream.close()
         p.terminate()

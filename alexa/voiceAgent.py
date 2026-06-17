@@ -112,8 +112,9 @@ CHANNELS = 1
 RATE     = 16000
 CHUNK    = 1280
 
-model_path = "bunny_work.onnx"
-wake_model = Model(wakeword_model_paths=[model_path])  # ← fixed parameter name
+import pathlib
+model_path = pathlib.Path(__file__).parent / "bunny_work.onnx"
+wake_model = Model(wakeword_model_paths=[str(model_path)])  # ← fixed parameter name
 
 # ── PyAudio is created once; streams are recreated each session ────────────────
 p = pyaudio.PyAudio()
@@ -499,7 +500,7 @@ async def main():
         play_beep(frequency=440, duration=0.15)
         await asyncio.sleep(0.5)
 
-if __name__ == "__main__":
+def run_voice_agent():
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
@@ -510,3 +511,6 @@ if __name__ == "__main__":
         output_stream.stop_stream()
         output_stream.close()
         p.terminate()
+
+if __name__ == "__main__":
+    run_voice_agent()
