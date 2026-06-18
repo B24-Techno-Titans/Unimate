@@ -1,0 +1,45 @@
+#:import dp kivy.metrics.dp
+#:import sp kivy.metrics.sp
+#:import Theme theme.Theme
+
+<SensorsScreenShell>:
+    orientation: 'vertical'
+    spacing: dp(8)
+    size_hint: 1, 1
+    pos_hint: {'x': 0, 'y': 0}
+    clock_lbl: clock_lbl
+    sensor_grid: sensor_grid
+
+    GridLayout:
+        cols: 3
+        size_hint_y: None
+        height: root.header_height
+        spacing: dp(4)
+
+        Widget:
+
+        Label:
+            text: 'SENSOR DASHBOARD'
+            font_size: Theme.TITLE
+            bold: True
+            color: Theme.ACCENT_SOFT
+            halign: 'center'
+            valign: 'middle'
+            text_size: self.size
+
+        Label:
+            id: clock_lbl
+            text: ''
+            font_size: root.clock_font_size
+            color: Theme.TEXT
+            halign: 'right'
+            valign: 'middle'
+            text_size: self.size
+
+    GridLayout:
+        id: sensor_grid
+        cols: 2
+        spacing: root.grid_gap
+        size_hint_y: 1
+        row_force_default: True
+        row_default_height: root.card_height

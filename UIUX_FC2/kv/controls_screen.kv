@@ -1,0 +1,26 @@
+#:import dp kivy.metrics.dp
+#:import Theme theme.Theme
+
+<ControlsScreenShell>:
+    orientation: 'vertical'
+    spacing: dp(8)
+    device_grid: device_grid
+
+    Label:
+        text: 'Controls'
+        size_hint_y: None
+        height: dp(40)
+        font_size: Theme.TITLE
+        bold: True
+        color: Theme.ACCENT_SOFT
+        halign: 'left'
+        valign: 'middle'
+        text_size: self.size
+
+    GridLayout:
+        id: device_grid
+        cols: 2
+        spacing: root.grid_gap
+        size_hint_y: 1
+        row_force_default: True
+        row_default_height: root.card_height
