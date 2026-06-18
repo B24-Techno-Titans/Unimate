@@ -1,10 +1,12 @@
+"""Capture server for sharing microphone between voice agent and UI's quiz system."""
 import sys
-import pyaudio
 import multiprocessing as mp
+import pyaudio
 
 from alexa import voiceAgent2_shared as va2s
 
 def audio_server(queues):
+    """Server process that accesses the microphone and keeps the queues filled."""
     pa = pyaudio.PyAudio()
     stream = pa.open(
         format=pyaudio.paInt16,
@@ -26,29 +28,24 @@ def audio_server(queues):
         stream.close()
         pa.terminate()
 
-# def consumer_a(queue):
-#     print("Consumer A started")
-#     while True:
-#         data = queue.get()
-#         # do something — e.g. keyword detection, volume meter, etc.
-#         print(f"A got {len(data)} bytes")
+def start_ui(audio_queue):
+    """UIUX_FC2 starter function to avoide flickering"""
+    with open("./ui_log", "a", encoding="utf-8", buffering=1) as log: # Logging
+        sys.stdout = log
+        sys.stderr = log
 
-def consumer_b(queue):
-    print("Consumer B started")
-    while True:
-        data = queue.get()
-        # print(f"B got {len(data)} bytes")
-        pass
+        from UIUX_FC2 import main as ui_main
+        ui_main.shared_start(audio_queue)
 
 if __name__ == "__main__":
-    q1 = mp.Queue(maxsize=50)
-    q2 = mp.Queue(maxsize=50)
+    q_voice = mp.Queue(maxsize=50)
+    q_quiz = mp.Queue(maxsize=50)
 
-    server  = mp.Process(target=audio_server, args=([q1, q2],))
-    worker_a = mp.Process(target=va2s.shared_start, args=(q1,))
-    worker_b = mp.Process(target=consumer_b, args=(q2,))
+    server = mp.Process(target=audio_server, args=([q_voice, q_quiz],))
+    voice_worker = mp.Process(target=va2s.shared_start, args=(q_voice,))
+    ui_worker = mp.Process(target=start_ui, args=(q_quiz,))
 
-    processes = [server, worker_a, worker_b]
+    processes = [server, voice_worker, ui_worker]
 
     for proc in processes:
         proc.start()

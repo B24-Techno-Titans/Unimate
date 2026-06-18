@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import logging
+import multiprocessing
+import queue
 import re
 import subprocess
 import sys
@@ -81,6 +83,29 @@ recognizer.non_speaking_duration = RECOGNIZER_NON_SPEAKING_DURATION_S
 recognizer.phrase_threshold = RECOGNIZER_PHRASE_THRESHOLD
 recognizer.dynamic_energy_threshold = True
 mic_index = MIC_INDEX
+
+# Shared mic queue (injected by capture_server via main.shared_start)
+_shared_audio_queue: multiprocessing.Queue | None = None
+SHARED_AUDIO_RATE = 16000
+SHARED_AUDIO_SAMPLE_WIDTH = 2
+SHARED_AUDIO_QUEUE_TIMEOUT_S = 0.5
+
+
+def set_shared_audio_queue(audio_queue: multiprocessing.Queue | None) -> None:
+    global _shared_audio_queue
+    _shared_audio_queue = audio_queue
+
+
+def _flush_shared_audio_queue() -> None:
+    if _shared_audio_queue is None:
+        return
+    while True:
+        try:
+            _shared_audio_queue.get_nowait()
+        except queue.Empty:
+            break
+        except Exception:
+            break
 
 
 def _piper_env() -> dict[str, str]:
@@ -507,12 +532,60 @@ def _combine_audio_chunks(chunks: list[sr.AudioData]) -> sr.AudioData | None:
     return sr.AudioData(raw, chunks[0].sample_rate, chunks[0].sample_width)
 
 
-def listen_for_quiz_answer(
+def _transcribe_quiz_audio(combined: sr.AudioData | None) -> str:
+    if combined is None:
+        return ""
+    try:
+        return recognizer.recognize_google(combined).strip()
+    except sr.UnknownValueError:
+        return ""
+    except sr.RequestError as exc:
+        raise RuntimeError(f"Speech API error: {exc}") from exc
+
+
+def _listen_for_quiz_answer_from_queue(
     cancel_event: threading.Event,
     *,
     time_limit_s: float = QUIZ_ANSWER_TIME_LIMIT_S,
 ) -> str:
-    """Record until time_limit_s or cancel_event (Done). No silence/pause stopping."""
+    """Record quiz answer from shared mic queue (16 kHz mono PCM)."""
+    if _shared_audio_queue is None:
+        raise RuntimeError("Shared audio queue not configured")
+
+    _flush_shared_audio_queue()
+    deadline = time.monotonic() + max(1.0, float(time_limit_s))
+    raw = bytearray()
+
+    while time.monotonic() < deadline:
+        if cancel_event.is_set():
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            data = _shared_audio_queue.get(timeout=min(SHARED_AUDIO_QUEUE_TIMEOUT_S, remaining))
+        except queue.Empty:
+            continue
+        except Exception:
+            continue
+        if data:
+            raw.extend(data)
+        if cancel_event.is_set():
+            break
+
+    if not raw:
+        return ""
+
+    combined = sr.AudioData(bytes(raw), SHARED_AUDIO_RATE, SHARED_AUDIO_SAMPLE_WIDTH)
+    return _transcribe_quiz_audio(combined)
+
+
+def _listen_for_quiz_answer_from_mic(
+    cancel_event: threading.Event,
+    *,
+    time_limit_s: float = QUIZ_ANSWER_TIME_LIMIT_S,
+) -> str:
+    """Record quiz answer from local microphone (standalone UI fallback)."""
     deadline = time.monotonic() + max(1.0, float(time_limit_s))
     chunks: list[sr.AudioData] = []
 
@@ -532,16 +605,24 @@ def listen_for_quiz_answer(
             if cancel_event.is_set():
                 break
 
-    combined = _combine_audio_chunks(chunks)
-    if combined is None:
-        return ""
+    return _transcribe_quiz_audio(_combine_audio_chunks(chunks))
 
-    try:
-        return recognizer.recognize_google(combined).strip()
-    except sr.UnknownValueError:
-        return ""
-    except sr.RequestError as exc:
-        raise RuntimeError(f"Speech API error: {exc}") from exc
+
+def listen_for_quiz_answer(
+    cancel_event: threading.Event,
+    *,
+    time_limit_s: float = QUIZ_ANSWER_TIME_LIMIT_S,
+) -> str:
+    """Record until time_limit_s or cancel_event (Done). No silence/pause stopping."""
+    if _shared_audio_queue is not None:
+        return _listen_for_quiz_answer_from_queue(
+            cancel_event,
+            time_limit_s=time_limit_s,
+        )
+    return _listen_for_quiz_answer_from_mic(
+        cancel_event,
+        time_limit_s=time_limit_s,
+    )
 
 
 def _parse_quiz_eval_json(text: str) -> dict[str, object]:

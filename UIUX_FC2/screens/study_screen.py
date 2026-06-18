@@ -116,7 +116,7 @@ from widgets.panels import GlowPanel
 from widgets.study_widgets import StudyTile, WheelPickerColumn
 from widgets.todo_widgets import TodoRow, UniMateKeyboard
 
-def build_study_screen(on_voice_quiz_open: Callable[[], None] | None = None) -> Screen:
+def build_study_screen() -> Screen:
     screen = Screen(name="study")
     root = FloatLayout()
 
@@ -1947,8 +1947,6 @@ def build_study_screen(on_voice_quiz_open: Callable[[], None] | None = None) -> 
                 status_lbl.color = Theme.DANGER
                 return
             status_lbl.text = ""
-            if on_voice_quiz_open is not None:
-                on_voice_quiz_open()
             if quiz_file_picker is not None:
                 quiz_file_picker.dismiss()
             _open_quiz_popup(questions)

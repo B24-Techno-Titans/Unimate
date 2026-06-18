@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import os
-import signal
-import subprocess
 import threading
 from pathlib import Path
 import json
@@ -78,6 +76,7 @@ from emotions.morph import RoboMorphWidget  # noqa: E402
 from emotions.selector import build_emotion_screen  # noqa: E402
 from robo_eyes import RoboEyesWidget, schedule_random_idle_charm  # noqa: E402
 from theme import Theme  # noqa: E402
+from nlp_functions import set_shared_audio_queue  # noqa: E402
 
 
 def _silence_probesysfs_xinput_warnings() -> None:
@@ -125,11 +124,6 @@ _SWIPE_NEXT = {
 }
 
 IDLE_FACE_TIMEOUT_S = 120.0
-VOICE_AGENT_DIR = Path(__file__).resolve().parent.parent / "alexa"
-VOICE_AGENT_SCRIPT = VOICE_AGENT_DIR / "voiceAgentCopy.py"
-VOICE_AGENT_VENV_ACTIVATE = Path.home() / "unimate" / "bin" / "activate"
-VOICE_AGENT_LOG = VOICE_AGENT_DIR / "voice_agent_ui.log"
-
 
 class FourScreenSwipeManager(ScreenManager):
     """Horizontal swipe: Study—Face—Emotion—Sensors—Controls (no chrome)."""
@@ -197,13 +191,13 @@ class UniMateKivyUI(BoxLayout):
         self.state = MockState()
         self.sensors_refs: SensorsRefs | None = None
         self._sensor_poll_busy = False
-        self._voice_agent_proc: subprocess.Popen | None = None
-        self._voice_agent_log = None
-        self._start_voice_agent()
 
-        self.manager = FourScreenSwipeManager(transition=SlideTransition(duration=0.22), size_hint=(1, 1))
+        self.manager = FourScreenSwipeManager(
+            transition=SlideTransition(duration=0.22),
+            size_hint=(1, 1)
+        )
 
-        study = build_study_screen(on_voice_quiz_open=self.stop_voice_agent)
+        study = build_study_screen()
         self.manager.add_widget(study)
 
         self.eyes_widget = RoboEyesWidget()
@@ -239,64 +233,6 @@ class UniMateKivyUI(BoxLayout):
         self.manager.current = "face"
         self._on_screen_changed()
         self._tick_state()
-
-    def _start_voice_agent(self) -> None:
-        if self._voice_agent_proc is not None and self._voice_agent_proc.poll() is None:
-            return
-        if not VOICE_AGENT_SCRIPT.is_file():
-            print(f"[voice-agent] script not found: {VOICE_AGENT_SCRIPT}")
-            return
-        if not VOICE_AGENT_VENV_ACTIVATE.is_file():
-            print(f"[voice-agent] venv activate not found: {VOICE_AGENT_VENV_ACTIVATE}")
-            return
-
-        command = f'source "{VOICE_AGENT_VENV_ACTIVATE}" && exec python "{VOICE_AGENT_SCRIPT.name}"'
-        try:
-            self._voice_agent_log = VOICE_AGENT_LOG.open("a", encoding="utf-8", buffering=1)
-            self._voice_agent_proc = subprocess.Popen(
-                command,
-                cwd=str(VOICE_AGENT_DIR),
-                executable="/bin/bash",
-                shell=True,
-                stdout=self._voice_agent_log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            print(f"[voice-agent] started pid={self._voice_agent_proc.pid}")
-        except OSError as exc:
-            print(f"[voice-agent] failed to start: {exc}")
-            self._close_voice_agent_log()
-
-    def _close_voice_agent_log(self) -> None:
-        if self._voice_agent_log is not None:
-            try:
-                self._voice_agent_log.close()
-            except OSError:
-                pass
-            self._voice_agent_log = None
-
-    def stop_voice_agent(self) -> None:
-        proc = self._voice_agent_proc
-        self._voice_agent_proc = None
-        if proc is None:
-            self._close_voice_agent_log()
-            return
-        if proc.poll() is None:
-            print("[voice-agent] stopping")
-            try:
-                os.killpg(proc.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
-            try:
-                proc.wait(timeout=3.0)
-            except subprocess.TimeoutExpired:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                proc.wait(timeout=1.0)
-        self._close_voice_agent_log()
 
     def _face_screen(self) -> Screen:
         screen = Screen(name="face")
@@ -412,10 +348,10 @@ class UniMateApp(App):
         self.root_widget = UniMateKivyUI()
         return self.root_widget
 
-    def on_stop(self) -> None:
-        root = getattr(self, "root_widget", None)
-        if root is not None:
-            root.stop_voice_agent()
+def shared_start(audio_queue) -> None:
+    """Entry point for shared_mic/capture_server.py child process."""
+    set_shared_audio_queue(audio_queue)
+    UniMateApp().run()
 
 
 if __name__ == "__main__":
