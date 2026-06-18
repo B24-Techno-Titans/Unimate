@@ -102,6 +102,7 @@ from widgets.common import (
     quiz_display_name,
     schedule_touch_safe,
     write_pdf_mode_status,
+    write_mic_in_use,
     write_voice_trigger,
 )
 from widgets.mcq_widgets import (
@@ -1306,6 +1307,12 @@ def build_study_screen() -> Screen:
                 quiz_worker.join(timeout=0.2)
             quiz_worker = None
 
+        def _acquire_quiz_mic() -> None:
+            write_mic_in_use(True)
+
+        def _release_quiz_mic() -> None:
+            write_mic_in_use(False)
+
         def _average_score() -> int:
             if not evaluated:
                 return 0
@@ -1820,6 +1827,7 @@ def build_study_screen() -> Screen:
             if current_idx == 0 and 0 not in evaluated:
                 _cancel_quiz_worker()
                 _stop_record_tick()
+                _release_quiz_mic()
                 if quiz_popup is not None:
                     quiz_popup.dismiss()
                 Clock.schedule_once(lambda _dt: _open_quiz_file_picker(), 0)
@@ -1834,6 +1842,7 @@ def build_study_screen() -> Screen:
         def _on_action() -> None:
             nonlocal current_idx, show_score, phase
             if show_score:
+                _release_quiz_mic()
                 if quiz_popup is not None:
                     quiz_popup.dismiss()
                 return
@@ -1867,11 +1876,14 @@ def build_study_screen() -> Screen:
         def _close_quiz(*_a) -> None:
             _cancel_quiz_worker()
             _stop_record_tick()
+            _release_quiz_mic()
             if quiz_popup is not None:
                 quiz_popup.dismiss()
 
         bind_touch_safe_on_press(close_btn, _close_quiz)
+        quiz_popup.bind(on_dismiss=lambda *_a: _release_quiz_mic())
         _refresh_quiz_view()
+        _acquire_quiz_mic()
         quiz_popup.open()
 
     def _open_quiz_file_picker() -> None:

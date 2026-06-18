@@ -1,9 +1,29 @@
 """Capture server for sharing microphone between voice agent and UI's quiz system."""
+import json
 import sys
 import multiprocessing as mp
+from pathlib import Path
+
 import pyaudio
 
 from alexa import voiceAgent2_shared as va2s
+
+RATE = 16000
+CHUNK_FRAMES = 1280
+SAMPLE_WIDTH = 2
+# Must match queue order in __main__: [q_voice, q_quiz]
+VOICE_QUEUE_INDEX = 0
+MIC_IN_USE_PATH = Path(__file__).resolve().parent / "mic_in_use.json"
+SILENT_CHUNK = b"\x00" * (CHUNK_FRAMES * SAMPLE_WIDTH)
+
+
+def is_ui_using_mic() -> bool:
+    try:
+        with MIC_IN_USE_PATH.open("r", encoding="utf-8") as f:
+            return bool(json.load(f).get("is_ui_using", False))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+
 
 def audio_server(queues):
     """Server process that accesses the microphone and keeps the queues filled."""
@@ -11,16 +31,18 @@ def audio_server(queues):
     stream = pa.open(
         format=pyaudio.paInt16,
         channels=1,
-        rate=16000,
+        rate=RATE,
         input=True,
-        frames_per_buffer=1280,
+        frames_per_buffer=CHUNK_FRAMES,
     )
     try:
         while True:
-            data = stream.read(1280, exception_on_overflow=False)
-            for q in queues:
+            data = stream.read(CHUNK_FRAMES, exception_on_overflow=False)
+            ui_using = is_ui_using_mic()
+            for i, q in enumerate(queues):
+                payload = SILENT_CHUNK if (i == VOICE_QUEUE_INDEX and ui_using) else data
                 if not q.full():
-                    q.put(data)
+                    q.put(payload)
     except KeyboardInterrupt:
         pass
     finally:
@@ -28,14 +50,16 @@ def audio_server(queues):
         stream.close()
         pa.terminate()
 
+
 def start_ui(audio_queue):
     """UIUX_FC2 starter function to avoide flickering"""
-    with open("./ui_log", "a", encoding="utf-8", buffering=1) as log: # Logging
+    with open("./ui_log", "a", encoding="utf-8", buffering=1) as log:  # Logging
         sys.stdout = log
         sys.stderr = log
 
         from UIUX_FC2 import main as ui_main
         ui_main.shared_start(audio_queue)
+
 
 if __name__ == "__main__":
     q_voice = mp.Queue(maxsize=50)

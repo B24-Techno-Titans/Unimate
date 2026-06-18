@@ -317,6 +317,7 @@ SUMMARIES_DIR = Path("/home/unimate/Unimate/summaries")
 SUMMARIES_MAX_FILES = 10
 PDF_MODE_STATUS_PATH = Path("/home/unimate/Unimate/pdf_mode/pdf_mode_status.json")
 VOICE_TRIGGER_PATH = Path("/home/unimate/Unimate/alexa/voice_trigger.json")
+MIC_IN_USE_PATH = Path("/home/unimate/Unimate/shared_mic/mic_in_use.json")
 
 MCQ_LETTERS = ("A", "B", "C", "D")
 TODO_KEYBOARD_ROWS = (
@@ -549,6 +550,18 @@ def write_voice_trigger(trigger: bool) -> None:
         )
     except OSError as exc:
         print(f"[dashboard] voice trigger write error: {exc}")
+
+
+def write_mic_in_use(is_ui_using: bool) -> None:
+    payload = {"is_ui_using": is_ui_using}
+    try:
+        MIC_IN_USE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MIC_IN_USE_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        print(f"[dashboard] mic_in_use write error: {exc}")
 
 
 def rgba_to_markup_color(rgba: tuple[float, float, float, float]) -> str:

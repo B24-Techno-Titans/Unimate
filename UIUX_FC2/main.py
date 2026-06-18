@@ -77,6 +77,7 @@ from emotions.selector import build_emotion_screen  # noqa: E402
 from robo_eyes import RoboEyesWidget, schedule_random_idle_charm  # noqa: E402
 from theme import Theme  # noqa: E402
 from nlp_functions import set_shared_audio_queue  # noqa: E402
+from widgets.common import write_mic_in_use  # noqa: E402
 
 
 def _silence_probesysfs_xinput_warnings() -> None:
@@ -350,6 +351,7 @@ class UniMateApp(App):
 
 def shared_start(audio_queue) -> None:
     """Entry point for shared_mic/capture_server.py child process."""
+    write_mic_in_use(False)
     set_shared_audio_queue(audio_queue)
     UniMateApp().run()
 
