@@ -19,7 +19,7 @@ def build_emotion_screen(
     *,
     on_expression_changed: Callable[[Expression], None] | None = None,
 ) -> Screen:
-    screen = Screen(name="emotion")
+    screen = Screen(name="face")
     root = BoxLayout(orientation="vertical", padding=0, spacing=0)
 
     with root.canvas.before:

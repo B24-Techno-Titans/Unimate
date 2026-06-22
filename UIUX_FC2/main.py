@@ -59,10 +59,9 @@ except OSError:
 from kivy.app import App  # noqa: E402
 from kivy.clock import Clock  # noqa: E402
 from kivy.core.window import Window  # noqa: E402
-from kivy.graphics import Color, Rectangle  # noqa: E402
 from kivy.metrics import dp  # noqa: E402
 from kivy.uix.boxlayout import BoxLayout  # noqa: E402
-from kivy.uix.screenmanager import Screen, ScreenManager, SlideTransition  # noqa: E402
+from kivy.uix.screenmanager import ScreenManager, SlideTransition  # noqa: E402
 
 from dashboard import (  # noqa: E402
     SensorsRefs,
@@ -74,7 +73,6 @@ from mock_state import MockState  # noqa: E402
 from raspi_bridge import SensorReadings, fetch_sensors  # noqa: E402
 from emotions.morph import RoboMorphWidget  # noqa: E402
 from emotions.selector import build_emotion_screen  # noqa: E402
-from robo_eyes import RoboEyesWidget, schedule_random_idle_charm  # noqa: E402
 from theme import Theme  # noqa: E402
 from nlp_functions import set_shared_audio_queue  # noqa: E402
 from widgets.common import write_mic_in_use  # noqa: E402
@@ -108,26 +106,24 @@ def _silence_probesysfs_xinput_warnings() -> None:
 
 _silence_probesysfs_xinput_warnings()
 
-SCREEN_ORDER = ("study", "face", "emotion", "sensors", "controls")
+SCREEN_ORDER = ("study", "face", "sensors", "controls")
 
-# Touch: Study ← Face → Emotion → Sensors → Controls. Swipe left (dx < 0) → next; right → previous.
+# Touch: Study ← Face → Sensors → Controls. Swipe left (dx < 0) → next; right → previous.
 _SWIPE_PREV = {
     "face": "study",
-    "emotion": "face",
-    "sensors": "emotion",
+    "sensors": "face",
     "controls": "sensors",
 }
 _SWIPE_NEXT = {
     "study": "face",
-    "face": "emotion",
-    "emotion": "sensors",
+    "face": "sensors",
     "sensors": "controls",
 }
 
 IDLE_FACE_TIMEOUT_S = 120.0
 
 class FourScreenSwipeManager(ScreenManager):
-    """Horizontal swipe: Study—Face—Emotion—Sensors—Controls (no chrome)."""
+    """Horizontal swipe: Study—Face—Sensors—Controls (no chrome)."""
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -173,6 +169,14 @@ class FourScreenSwipeManager(ScreenManager):
 
 
 class UniMateKivyUI(BoxLayout):
+    def _read_emotion_timestamp(self) -> float:
+        try:
+            path = Path(__file__).parent.parent / "alexa" / "emotion_state.json"
+            with open(path) as f:
+                return float(json.load(f).get("timestamp", 0))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return 0.0
+
     def _poll_emotion(self, *_args):
         try:
             path = Path(__file__).parent.parent / "alexa" / "emotion_state.json"
@@ -201,12 +205,10 @@ class UniMateKivyUI(BoxLayout):
         study = build_study_screen()
         self.manager.add_widget(study)
 
-        self.eyes_widget = RoboEyesWidget()
         self.morph_widget = RoboMorphWidget()
-        self.manager.add_widget(self._face_screen())
         self.manager.add_widget(build_emotion_screen(self.morph_widget))
 
-        self._last_emotion_ts = 0.0
+        self._last_emotion_ts = self._read_emotion_timestamp()
         Clock.schedule_interval(self._poll_emotion, 1.0)
 
         sensors, srefs = build_sensors_screen(self.state)
@@ -220,7 +222,6 @@ class UniMateKivyUI(BoxLayout):
         self.manager.bind(current=self._on_screen_changed)
 
         Clock.schedule_interval(lambda *_: self._tick_state(), 2.5)
-        schedule_random_idle_charm(self.eyes_widget, interval=9.0)
         Window.bind(on_key_down=self._on_key_down)
         Window.bind(
             on_touch_down=self._on_user_activity,
@@ -234,22 +235,6 @@ class UniMateKivyUI(BoxLayout):
         self.manager.current = "face"
         self._on_screen_changed()
         self._tick_state()
-
-    def _face_screen(self) -> Screen:
-        screen = Screen(name="face")
-        root = BoxLayout(orientation="vertical")
-        with root.canvas.before:
-            Color(*Theme.FACE_BG)
-            self._eyes_bg_rect = Rectangle(pos=root.pos, size=root.size)
-
-        def _sync_bg(*_a):
-            self._eyes_bg_rect.pos = root.pos
-            self._eyes_bg_rect.size = root.size
-
-        root.bind(pos=_sync_bg, size=_sync_bg)
-        root.add_widget(self.eyes_widget)
-        screen.add_widget(root)
-        return screen
 
     def _tick_state(self, *_args) -> None:
         if not self.sensors_refs or self._sensor_poll_busy:
@@ -288,15 +273,9 @@ class UniMateKivyUI(BoxLayout):
             r.spo2.set_value(f"{readings.spo2_pct:.0f}%", "Status: Optimal")
 
     def _on_screen_changed(self, *_args) -> None:
-        cur = self.manager.current
-        if cur == "face":
-            self.eyes_widget.start()
-            self.morph_widget.stop()
-        elif cur == "emotion":
-            self.eyes_widget.stop()
+        if self.manager.current == "face":
             self.morph_widget.start()
         else:
-            self.eyes_widget.stop()
             self.morph_widget.stop()
 
     def _on_user_activity(self, *_args) -> bool:

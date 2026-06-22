@@ -1,0 +1,57 @@
+{
+    "status": "success",
+    "total_pages": 1,
+    "total_chunks": 2,
+    "mcqs": [
+        {
+            "question": "Which Faculty and University issued these provisional results?",
+            "options": [
+                "A) Faculty of Engineering, University of Moratuwa",
+                "B) Faculty of Information Technology, University of Moratuwa, Sri Lanka",
+                "C) Faculty of Science, University of Colombo",
+                "D) Faculty of IT, University of Sri Jayewardenepura"
+            ],
+            "answer": "B) Faculty of Information Technology, University of Moratuwa, Sri Lanka"
+        },
+        {
+            "question": "What grade did student 245514J receive for CM1310?",
+            "options": [
+                "A) A",
+                "B) A-",
+                "C) B+",
+                "D) C+"
+            ],
+            "answer": "D) C+"
+        },
+        {
+            "question": "How many students received an 'A+' grade in CM1310?",
+            "options": [
+                "A) 3",
+                "B) 4",
+                "C) 5",
+                "D) 6"
+            ],
+            "answer": "B) 4"
+        },
+        {
+            "question": "According to the provided context, what is the status of the results for Intake 2024 - Semester 2?",
+            "options": [
+                "A) Final results, confirmed by the Senate",
+                "B) Provisional results, subject to confirmation by the senate",
+                "C) Provisional results, awaiting faculty approval",
+                "D) Final results, issued by LearnOrg"
+            ],
+            "answer": "B) Provisional results, subject to confirmation by the senate"
+        },
+        {
+            "question": "When were these results generated, according to the LearnOrg - Student Summary Page?",
+            "options": [
+                "A) 22/06/2024 05:35:55pm",
+                "B) 22/06/2026 05:35:55pm",
+                "C) 22/06/2025 05:35:55pm",
+                "D) 24/05/2024 05:35:55pm"
+            ],
+            "answer": "B) 22/06/2026 05:35:55pm"
+        }
+    ]
+}

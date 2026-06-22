@@ -193,7 +193,7 @@ def listen_for_wake_word_or_trigger() -> list:
 
         for word, score in predictions.items():
             if score > 0.01: print(f"Wake word score: {score}")
-            if score > 0.25:
+            if score > 0.02:
                 print(f"Wake word detected! ({word}: {score:.2f})")
                 play_beep()
                 # Discard the 10 chunks that contain the wake word itself

@@ -32,7 +32,7 @@ def build_controls_screen(state: MockState) -> Screen:
 
     grid = root.device_grid
 
-    fan = LevelDeviceCard("Ceiling Fan", "fan", state, speed_label="Speed", output_label="Output")
+    fan = LevelDeviceCard("Desk Fan", "fan", state, speed_label="Speed", output_label="Output")
     hum = LevelDeviceCard("Humidifier", "humidifier", state, speed_label="Speed", output_label="Output")
     light_basic = LightBasicCard(state)
     light_color = LightColorCard(state)
