@@ -264,13 +264,12 @@ class UniMateKivyUI(BoxLayout):
             r.lux.set_value(f"{readings.lux:.0f} lx", "Lux Intensity")
         if readings.heart_bpm is not None:
             self.state.heart_bpm = readings.heart_bpm
-            r.heart.set_value(f"{readings.heart_bpm} bpm", "Real-time, Last 5 mins")
         if readings.body_temp_c is not None:
             self.state.body_temp_c = readings.body_temp_c
             r.body_temp.set_value(f"{readings.body_temp_c:.1f} °C", "Status: Normal")
         if readings.spo2_pct is not None:
             self.state.spo2_pct = readings.spo2_pct
-            r.spo2.set_value(f"{readings.spo2_pct:.0f}%", "Status: Optimal")
+        r.refresh_vitals(self.state)
 
     def _on_screen_changed(self, *_args) -> None:
         if self.manager.current == "face":

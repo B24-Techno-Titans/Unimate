@@ -25,7 +25,39 @@ class SensorsRefs:
     lux: SensorDashboardCard
     heart: SensorDashboardCard
     body_temp: SensorDashboardCard
-    spo2: SensorDashboardCard
+    stress: SensorDashboardCard
+
+    def refresh_vitals(self, state: MockState) -> None:
+        self.heart.set_value(f"{state.heart_bpm} bpm | {state.spo2_pct:.0f}%", "Heart Rate | SpO2")
+        level, color = _stress_level(state.heart_bpm, state.body_temp_c, state.spo2_pct)
+        alert_text = "I suggest to take a break" if level == "Stressed" else "HR, Temp, SpO2"
+        self.stress.set_value(level, alert_text)
+        self.stress.value_label.color = color
+        self.stress.sub_label.color = Theme.WARN if level == "Stressed" else Theme.MUTED
+
+
+def _stress_level(heart_bpm: int, body_temp_c: float, spo2_pct: float) -> tuple[str, tuple[float, float, float, float]]:
+    score = 0
+    if heart_bpm >= 100:
+        score += 45
+    elif heart_bpm >= 85:
+        score += 25
+
+    if body_temp_c >= 37.8:
+        score += 30
+    elif body_temp_c >= 37.3:
+        score += 15
+
+    if spo2_pct < 95:
+        score += 25
+    elif spo2_pct < 97:
+        score += 10
+
+    if score >= 60:
+        return "Stressed", Theme.DANGER
+    if score >= 30:
+        return "Moderate", Theme.WARN
+    return "Normal", Theme.OK
 
 
 def build_sensors_screen(state: MockState) -> tuple[Screen, SensorsRefs]:
@@ -78,7 +110,7 @@ def build_sensors_screen(state: MockState) -> tuple[Screen, SensorsRefs]:
         Theme.WARN,
     )
     heart = SensorDashboardCard(
-        "User Heart Rate",
+        "Heart Rate + O2",
         "heart-rate.png",
         Theme.DANGER,
     )
@@ -87,12 +119,12 @@ def build_sensors_screen(state: MockState) -> tuple[Screen, SensorsRefs]:
         "temperature.png",
         Theme.TEXT,
     )
-    spo2 = SensorDashboardCard(
-        "Blood Oxygen",
+    stress = SensorDashboardCard(
+        "Stress Level",
         "oxygen.png",
-        Theme.DANGER,
+        Theme.WARN,
     )
-    for card in (temp, humidity, lux, heart, body_temp, spo2):
+    for card in (temp, humidity, lux, heart, body_temp, stress):
         grid.add_widget(card)
 
     root.add_widget(content)
@@ -100,9 +132,7 @@ def build_sensors_screen(state: MockState) -> tuple[Screen, SensorsRefs]:
     temp.set_value(f"{state.room_temp_c:.1f} °C", "Avg. Main Room")
     humidity.set_value(f"{state.humidity_pct:.0f}%", "Main Room")
     lux.set_value(f"{state.lux:.0f} lx", "Lux Intensity")
-    heart.set_value(f"{state.heart_bpm} bpm", "Real-time, Last 5 mins")
     body_temp.set_value(f"{state.body_temp_c:.1f} °C", "Status: Normal")
-    spo2.set_value(f"{state.spo2_pct:.0f}%", "Status: Optimal")
 
     screen.add_widget(root)
     refs = SensorsRefs(
@@ -111,6 +141,7 @@ def build_sensors_screen(state: MockState) -> tuple[Screen, SensorsRefs]:
         lux=lux,
         heart=heart,
         body_temp=body_temp,
-        spo2=spo2,
+        stress=stress,
     )
+    refs.refresh_vitals(state)
     return screen, refs
