@@ -391,7 +391,7 @@ async def run_session(pre_buffer: list):
     is_speaking.clear()
 
     dynamic_instruction =bot_instruction
-    json_path="../pdf_mode/pdf_mode_status.json"
+    json_path="/home/unimate/Unimate/pdf_mode/pdf_mode_status.json"
 
     client   = genai.Client(api_key=api_key)
     model_id = "gemini-2.5-flash-native-audio-latest"

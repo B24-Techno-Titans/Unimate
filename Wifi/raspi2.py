@@ -225,6 +225,19 @@ async def setHumid(req:Request):
     body=await req.json()
     print("\033[94m" + "Body: ", body, "\033[0m")
 
+    new_auto = bool(body.get("autoHumid", False))
+    if new_auto and not dc.auto_humid_on:
+        asyncio.create_task(dc.autoHumidifier())
+    elif not new_auto and dc.auto_humid_on:
+        dc.stopAutoHumidifier()
+
+    dc.auto_humid_on = new_auto
+
+    if not new_auto:
+        dc.control_humidifier(body.get("level", 0))
+
+    return {"ok": True}
+
 # function to delete old files
 def clean_old_files(directory_path,max_files=10):
     files = [os.path.join(directory_path, f) for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]

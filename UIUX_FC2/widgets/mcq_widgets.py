@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import math
 from typing import Callable
 
 from kivy.clock import Clock

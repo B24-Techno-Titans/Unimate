@@ -11,7 +11,10 @@ from . import LuxSensor, TempSensor
 auto_light_on = False
 auto_fan_on = False
 _current_fan_speed = -1
+auto_humid_on = False
+_current_humid_level = -1
 
+# -------------- Basic Device Controls --------------
 def control_fan(speed: int):
     try:
         requests.get(f"{FAN_URL}?speed={speed}", timeout=4)
@@ -40,15 +43,17 @@ def control_light(**kwargs):
     colour = kwargs.get("rgb", None)
     brightness = kwargs.get("brightness", None)
 
-    if(colour != None): params["rgb"] = colour
-    if(brightness != None): params["brightness"] = brightness
+    if(colour != None): params["rgb"] = "#" + colour
+    print("Colour: ", params["rgb"])
+    if(brightness != None): params["brightness"] = min(brightness, 100) # limit to 100 for low power usage
 
     try:
         response = requests.get(LED_URL, params=params, timeout=5)
+        print("Request: ", response.request.url)
         
         if response.status_code == 200:
-            # print("Colour change requested successfully")
-            # print("ESP32 says:", response.text)
+            print("Colour change requested successfully")
+            print("ESP32 says:", response.text)
             pass
         else:
             print(f"Failed with status code: {response.status_code}")
@@ -56,8 +61,7 @@ def control_light(**kwargs):
     except requests.exceptions.RequestException as e:
         print(f"Connection Error: {e}")
 
-
-
+# -------------- Auto Brightness --------------
 def lux_to_brightness(lux, Lmax=500):
     """
     Convert ambient light in lux to brightness (0-255).
@@ -98,14 +102,13 @@ def stopAutoBrightness():
     global auto_light_on
     auto_light_on = False
 
-
+# -------------- Auto Fan Speed --------------
 def temp_to_fan_speed(temp_c: float) -> int:
     if temp_c < 26:
         return 0
     if temp_c <= 30:
         return 1
     return 2
-
 
 async def autoFanSpeed():
     global auto_fan_on, _current_fan_speed
@@ -120,9 +123,32 @@ async def autoFanSpeed():
         print("Current fan speed: ", _current_fan_speed)
         await asyncio.sleep(2)
 
-
 def stopAutoFanSpeed():
     global auto_fan_on, _current_fan_speed
     auto_fan_on = False
     _current_fan_speed = 0
 
+# -------------- Auto Humidifier --------------
+def humid_to_humid_level(humid: float) -> int:
+    if humid < 80:
+        return 2
+    if humid <= 90:
+        return 1
+    return 0
+
+async def autoHumidifier():
+    global auto_humid_on
+    auto_humid_on = True
+    while auto_humid_on:
+        humid = TempSensor.get_humidity()
+        level = humid_to_humid_level(humid)
+        if level != _current_humid_level:
+            control_humidifier(level)
+            _current_humid_level = level
+
+        print("Current humidifier level: ", _current_humid_level)
+        await asyncio.sleep(0.1)
+
+def stopAutoHumidifier():
+    global auto_humid_on
+    auto_humid_on = False

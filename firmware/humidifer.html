@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Humidifier</title>
+<style>
+  body { font-family: system-ui; max-width:420px; margin:40px auto; text-align:center; background-color: rgb(204, 210, 234);}
+  h2 { margin-bottom:10px; }
+  #state { font-size:22px; margin:16px 0; }
+  button {
+    width:100%; padding:18px;
+    font-size:22px; border:none;
+    border-radius:12px;
+    background:#9260c5; color:white;
+  }
+  button:disabled { background:#999; }
+</style>
+</head>
+<body>
+<h2>Humidifier Control</h2>
+<div id="state">Loading…</div>
+<button id="btn" onclick="press()">PRESS</button>
+<p style="opacity:.6;margin-top:20px;">http://humidifier.local</p>
+
+<script>
+async function refresh(){
+  let r = await fetch('/state');
+  let j = await r.json();
+  document.getElementById('state').innerText = "Mode: " + j.name;
+}
+
+async function press(){
+  const b = document.getElementById('btn');
+  b.disabled = true;
+  b.innerText = "PRESSING";
+  try {
+    let r = await fetch('/press');
+    let j = await r.json();
+    document.getElementById('state').innerText = "Mode: " + j.name;
+  } catch {}
+  setTimeout(()=>{
+    b.disabled = false;
+    b.innerText = "PRESS";
+  }, 1600);
+}
+
+refresh();
+</script>
+</body>
+</html>

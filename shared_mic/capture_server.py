@@ -53,7 +53,7 @@ def audio_server(queues):
 
 def start_ui(audio_queue):
     """UIUX_FC2 starter function to avoide flickering"""
-    with open("./ui_log", "a", encoding="utf-8", buffering=1) as log:  # Logging
+    with open("/home/unimate/Unimate/shared_mic/ui_log", "a", encoding="utf-8", buffering=1) as log:  # Logging
         sys.stdout = log
         sys.stderr = log
 
