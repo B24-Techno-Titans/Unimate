@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from collections import Counter, deque
+from dataclasses import dataclass, field
+from typing import Callable
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -12,6 +14,68 @@ def _clamp(value: float, low: float, high: float) -> float:
 
 def _clamp_int(value: int, low: int, high: int) -> int:
     return max(low, min(high, value))
+
+
+_STRESS_SEVERITY = {"Normal": 0, "Moderate": 1, "Stressed": 2}
+
+
+@dataclass
+class VitalSnapshot:
+    heart_bpm: int
+    body_temp_c: float
+    spo2_pct: float
+
+
+class VitalsBuffer:
+    MAXLEN = 30
+
+    def __init__(self) -> None:
+        self._snapshots: deque[VitalSnapshot] = deque(maxlen=self.MAXLEN)
+
+    def push(
+        self,
+        heart_bpm: int | None,
+        body_temp_c: float | None,
+        spo2_pct: float | None,
+    ) -> None:
+        if heart_bpm is None or body_temp_c is None or spo2_pct is None:
+            return
+        if heart_bpm <= 0 or body_temp_c <= 0 or spo2_pct <= 0:
+            return
+        self._snapshots.append(
+            VitalSnapshot(
+                heart_bpm=int(heart_bpm),
+                body_temp_c=float(body_temp_c),
+                spo2_pct=float(spo2_pct),
+            )
+        )
+
+    def snapshots(self) -> list[VitalSnapshot]:
+        return list(self._snapshots)
+
+    def averages(self) -> tuple[int | None, float | None, float | None]:
+        if not self._snapshots:
+            return None, None, None
+        n = len(self._snapshots)
+        heart = round(sum(s.heart_bpm for s in self._snapshots) / n)
+        body_temp = sum(s.body_temp_c for s in self._snapshots) / n
+        spo2 = sum(s.spo2_pct for s in self._snapshots) / n
+        return heart, body_temp, spo2
+
+    def stress_level_majority(
+        self,
+        score_fn: Callable[[int, float, float], tuple[str, tuple[float, float, float, float]]],
+    ) -> tuple[str | None, tuple[float, float, float, float] | None]:
+        if not self._snapshots:
+            return None, None
+        counts: Counter[str] = Counter()
+        colors: dict[str, tuple[float, float, float, float]] = {}
+        for snap in self._snapshots:
+            level, color = score_fn(snap.heart_bpm, snap.body_temp_c, snap.spo2_pct)
+            counts[level] += 1
+            colors[level] = color
+        level = max(counts, key=lambda name: (counts[name], _STRESS_SEVERITY[name]))
+        return level, colors[level]
 
 
 @dataclass
@@ -31,6 +95,7 @@ class MockState:
     auto_fan: bool = False
     auto_humidifier: bool = False
     auto_light: bool = False
+    vitals_buffer: VitalsBuffer = field(default_factory=VitalsBuffer)
 
     def set_fan_off(self) -> None:
         self.fan_level = 0

@@ -57,6 +57,12 @@ class SensorReadings:
     spo2_pct: float | None = None
 
 
+def _valid_vital(value: float | None) -> float | None:
+    if value is None or value <= 0:
+        return None
+    return value
+
+
 def _first_number(data: dict[str, Any], *keys: str) -> float | None:
     for key in keys:
         if key not in data:
@@ -91,9 +97,9 @@ def parse_sensor_payload(data: dict[str, Any]) -> SensorReadings:
     if not payload:
         return SensorReadings()
 
-    heart = _first_number(payload, "heartRate", "heartrate", "heart_rate")
-    spo2 = _first_number(payload, "spO2", "spo2", "SpO2")
-    body_temp = _first_number(payload, "temperature", "body_temp", "bodyTemp")
+    heart = _valid_vital(_first_number(payload, "heartRate", "heartrate", "heart_rate"))
+    spo2 = _valid_vital(_first_number(payload, "spO2", "spo2", "SpO2"))
+    body_temp = _valid_vital(_first_number(payload, "temperature", "body_temp", "bodyTemp"))
 
     heart_bpm = int(heart) if heart is not None else None
     return SensorReadings(

@@ -28,8 +28,25 @@ class SensorsRefs:
     stress: SensorDashboardCard
 
     def refresh_vitals(self, state: MockState) -> None:
-        self.heart.set_value(f"{state.heart_bpm} bpm | {state.spo2_pct:.0f}%", "Heart Rate | SpO2")
-        level, color = _stress_level(state.heart_bpm, state.body_temp_c, state.spo2_pct)
+        heart_bpm, body_temp_c, spo2_pct = state.vitals_buffer.averages()
+
+        if heart_bpm is not None and spo2_pct is not None:
+            self.heart.set_value(f"{heart_bpm} bpm | {spo2_pct:.0f}%", "Heart Rate | SpO2")
+        else:
+            self.heart.set_value("— bpm | —", "Heart Rate | SpO2")
+
+        if body_temp_c is not None:
+            self.body_temp.set_value(f"{body_temp_c:.1f} °C", "Status: Normal")
+        else:
+            self.body_temp.set_value("— °C", "Waiting for vitals")
+
+        level, color = state.vitals_buffer.stress_level_majority(_stress_level)
+        if level is None or color is None:
+            self.stress.set_value("—", "Waiting for vitals")
+            self.stress.value_label.color = Theme.MUTED
+            self.stress.sub_label.color = Theme.MUTED
+            return
+
         alert_text = "I suggest to take a break" if level == "Stressed" else "HR, Temp, SpO2"
         self.stress.set_value(level, alert_text)
         self.stress.value_label.color = color
@@ -132,7 +149,6 @@ def build_sensors_screen(state: MockState) -> tuple[Screen, SensorsRefs]:
     temp.set_value(f"{state.room_temp_c:.1f} °C", "Avg. Main Room")
     humidity.set_value(f"{state.humidity_pct:.0f}%", "Main Room")
     lux.set_value(f"{state.lux:.0f} lx", "Lux Intensity")
-    body_temp.set_value(f"{state.body_temp_c:.1f} °C", "Status: Normal")
 
     screen.add_widget(root)
     refs = SensorsRefs(
