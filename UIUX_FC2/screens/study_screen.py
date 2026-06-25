@@ -2451,7 +2451,7 @@ def build_study_screen() -> Screen:
         _open_timer_popup()
 
     def _on_ask_bunny_tile_tap() -> None:
-        _open_ask_bunny_popup()
+        write_voice_trigger(True)
 
     def _on_generate_mcq_tile_tap() -> None:
         # Defer so the tile touch-up cannot land on the first file row in the new popup.
