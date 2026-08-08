@@ -62,7 +62,8 @@ CAPTION_AUDIO_LAG_S = 0.4
 
 QUIZ_ANSWER_TIME_LIMIT_S = 60
 QUIZ_RECORD_CHUNK_S = 0.25
-QUIZ_EVAL_MODEL = OPENAI_MODEL
+# QUIZ_EVAL_MODEL = OPENAI_MODEL
+QUIZ_EVAL_MODEL = "gemini-flash-latest"
 QUIZ_EVAL_TEMPERATURE = 0.2
 
 PERSONALITY_PROMPT = (
@@ -645,6 +646,15 @@ def _parse_quiz_eval_json(text: str) -> dict[str, object]:
             pass
     return {}
 
+from google import genai
+from google.genai import types
+
+def _gemini_client() -> genai.Client:
+    global client
+    if client is None:
+        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    return client
+
 
 def evaluate_quiz_answer(
     question: str,
@@ -673,17 +683,18 @@ def evaluate_quiz_answer(
     )
 
     try:
-        response = _openai_client().chat.completions.create(
+        response = _gemini_client().models.generate_content(
             model=QUIZ_EVAL_MODEL,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=QUIZ_EVAL_TEMPERATURE,
+            contents=user_msg,
+            config=types.GenerateContentConfig(
+                system_instruction=system_msg,
+                temperature=QUIZ_EVAL_TEMPERATURE,
+                response_mime_type="application/json",
+            ),
         )
-        raw = (response.choices[0].message.content or "").strip()
+        raw = (response.text or "").strip()
     except Exception as exc:
-        raise RuntimeError(f"OpenAI grading failed: {exc}") from exc
+        raise RuntimeError(f"Gemini grading failed: {exc}") from exc
 
     parsed = _parse_quiz_eval_json(raw)
     score_raw = parsed.get("score", 0)
@@ -697,6 +708,59 @@ def evaluate_quiz_answer(
     if not feedback_text:
         feedback_text = "Answer evaluated."
     return QuizEvaluation(score=score, feedback=feedback_text, raw_response=raw)
+
+
+# def evaluate_quiz_answer(
+#     question: str,
+#     expected_answer: str,
+#     transcript: str,
+# ) -> QuizEvaluation:
+#     """Compare spoken transcript to the reference answer; return score 0-100."""
+#     transcript = transcript.strip()
+#     if not transcript:
+#         return QuizEvaluation(
+#             score=0,
+#             feedback="No answer detected.",
+#             raw_response="",
+#         )
+
+#     system_msg = (
+#         "You grade short essay quiz answers. "
+#         "Compare the student's spoken transcript to the expected reference answer. "
+#         "Score semantic correctness, not exact wording. "
+#         'Return ONLY valid JSON: {"score": <integer 0-100>, "feedback": "<one short sentence>"}'
+#     )
+#     user_msg = (
+#         f"Question:\n{question}\n\n"
+#         f"Expected answer:\n{expected_answer}\n\n"
+#         f"Student transcript:\n{transcript}"
+#     )
+
+#     try:
+#         response = _openai_client().chat.completions.create(
+#             model=QUIZ_EVAL_MODEL,
+#             messages=[
+#                 {"role": "system", "content": system_msg},
+#                 {"role": "user", "content": user_msg},
+#             ],
+#             temperature=QUIZ_EVAL_TEMPERATURE,
+#         )
+#         raw = (response.choices[0].message.content or "").strip()
+#     except Exception as exc:
+#         raise RuntimeError(f"OpenAI grading failed: {exc}") from exc
+
+#     parsed = _parse_quiz_eval_json(raw)
+#     score_raw = parsed.get("score", 0)
+#     try:
+#         score = int(round(float(score_raw)))
+#     except (TypeError, ValueError):
+#         score = 0
+#     score = max(0, min(100, score))
+#     feedback = parsed.get("feedback")
+#     feedback_text = feedback.strip() if isinstance(feedback, str) else ""
+#     if not feedback_text:
+#         feedback_text = "Answer evaluated."
+#     return QuizEvaluation(score=score, feedback=feedback_text, raw_response=raw)
 
 
 def run_quiz_answer_pipeline(

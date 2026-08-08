@@ -13,6 +13,7 @@ import re
 import json
 import requests
 import multiprocessing
+from shared_utils.device_controls import control_humidifier
 # from Final_Codes.NLP.humidifier import set_humidifier
 
 # LED URLs
@@ -31,9 +32,10 @@ EMOTION_STATE_PATH = os.path.join(os.path.dirname(__file__), "emotion_state.json
 
 load_dotenv(override=True)
 api_key = os.getenv("GEMINI_API_KEY")
+print(f"[DEBUG] api_key loaded: {bool(api_key)}, prefix: {api_key[:6] if api_key else None}")
 
 bot_instruction = """
-    You are the AI persona of a physical hardware smart companion named bunny. You are a cute, enthusiastic, and supportive study buddy designed to help users learn, brainstorm, manage their tasks, and chat.
+    You are "bunny" a AI persona of a physical hardware smart companion. You are a cute, enthusiastic, and supportive study buddy designed to help users learn, brainstorm, manage their tasks, and chat.
 
     ### 1. Emotion Commands
     You have three emotions: happy, sad, and angry.
@@ -103,7 +105,9 @@ bot_instruction = """
     Never speak any command tags out loud — they are silent metadata only.
     If no device control is needed, do not emit any hardware command tag.
 
-    - Note to model: The user might speak or ask questions in a mix of English and Sinhala (Singlish) or any other language. Respond naturally in the same language style they use, while strictly keeping the cute persona and mood constraints.
+    - Note to model: The user might speak or ask questions in a mix of English and Sinhala (Singlish) or any other language.
+    Respond naturally in the same language style they use, while strictly keeping the cute persona and mood constraints.
+    However, your default language should be English
     """
 
 SILENCE_TIMEOUT = 15
@@ -286,12 +290,12 @@ def handle_device_command(cmd_string: str):
             
     elif device == "humidifier": 
         print(f"Setting HUMIDIFIER to {action.upper()}")
-        # if action == "on":
-        #     print("Turning HUMIDIFIER ON")
-        #     set_humidifier(1)
-        # else:
-        #     print("Turning HUMIDIFIER OFF")
-        #     set_humidifier(0)
+        if action == "on":
+            # print("Turning HUMIDIFIER ON")
+            control_humidifier(1)
+        else:
+            # print("Turning HUMIDIFIER OFF")
+            control_humidifier(0)
 
 
 async def audio_input(session, stop_event: asyncio.Event, pre_buffer: list):

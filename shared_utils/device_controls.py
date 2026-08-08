@@ -43,17 +43,15 @@ def control_light(**kwargs):
     colour = kwargs.get("rgb", None)
     brightness = kwargs.get("brightness", None)
 
-    if(colour != None): params["rgb"] = "#" + colour
-    print("Colour: ", params["rgb"])
     if(brightness != None): params["brightness"] = min(brightness, 100) # limit to 100 for low power usage
 
     try:
         response = requests.get(LED_URL, params=params, timeout=5)
-        print("Request: ", response.request.url)
+        # print("Request: ", response.request.url)
         
         if response.status_code == 200:
-            print("Colour change requested successfully")
-            print("ESP32 says:", response.text)
+            # print("Colour change requested successfully")
+            # print("ESP32 says:", response.text)
             pass
         else:
             print(f"Failed with status code: {response.status_code}")
@@ -131,13 +129,14 @@ def stopAutoFanSpeed():
 # -------------- Auto Humidifier --------------
 def humid_to_humid_level(humid: float) -> int:
     if humid < 80:
-        return 2
-    if humid <= 90:
         return 1
-    return 0
+    elif humid <= 90:
+        return 2
+    else:
+        return 0
 
 async def autoHumidifier():
-    global auto_humid_on
+    global auto_humid_on, _current_humid_level
     auto_humid_on = True
     while auto_humid_on:
         humid = TempSensor.get_humidity()
@@ -146,7 +145,7 @@ async def autoHumidifier():
             control_humidifier(level)
             _current_humid_level = level
 
-        print("Current humidifier level: ", _current_humid_level)
+        # print("Current humidifier level: ", _current_humid_level)
         await asyncio.sleep(0.1)
 
 def stopAutoHumidifier():

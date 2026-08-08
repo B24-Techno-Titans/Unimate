@@ -21,6 +21,7 @@ Expression = Literal["normal", "sad", "angry", "happy"]
 
 TRANSITION_DURATION = 0.52
 HAPPY_TRANSITION_DURATION = 0.68
+EMOTION_RESET_TIMEOUT_SECONDS = 10  # Auto-reset to 'normal' after this duration (easily adjustable)
 
 # normal ↔ happy: eyes → lashes → brows → mouth (overlapping, ease-in-out)
 HAPPY_FORWARD_STAGES = {
@@ -323,6 +324,9 @@ class RoboMorphWidget(Widget):
         self._queued: Expression | None = None
         self._animating = False
         self._trans_duration = TRANSITION_DURATION
+        
+        # Emotion auto-reset timer
+        self._reset_timer: object | None = None
 
         self._border_lines: list[Line] = []
         self._bg_rect: Rectangle | None = None
@@ -515,6 +519,16 @@ class RoboMorphWidget(Widget):
         current = self._settled
         if current == target:
             return
+        
+        # Cancel any existing reset timer and schedule a new one if target is non-normal
+        if self._reset_timer is not None:
+            self._reset_timer.cancel()
+            self._reset_timer = None
+        if target != "normal":
+            self._reset_timer = Clock.schedule_once(
+                self._reset_emotion_to_normal, EMOTION_RESET_TIMEOUT_SECONDS
+            )
+        
         if current != "normal" and target != "normal":
             self._queued = target
             self._begin_transition(current, "normal", reverse=True)
@@ -545,6 +559,12 @@ class RoboMorphWidget(Widget):
         else:
             self._queued = None
         self._layout()
+    
+    def _reset_emotion_to_normal(self, _dt: float) -> None:
+        """Reset emotion to 'normal' after the timeout expires."""
+        self._reset_timer = None
+        if self._settled != "normal":
+            self.set_expression("normal")
 
     def _is_happy_transition(self) -> bool:
         if not self._animating:
@@ -582,6 +602,9 @@ class RoboMorphWidget(Widget):
         if self._event is not None:
             self._event.cancel()
             self._event = None
+        if self._reset_timer is not None:
+            self._reset_timer.cancel()
+            self._reset_timer = None
         self._paused = True
 
     def start(self) -> None:
