@@ -437,6 +437,17 @@ async def audio_input(session, stop_event: asyncio.Event, pre_buffer: list):
         print(f"Error in audio_input: {e}")
 
 
+def _tool_response(fn_call, payload: dict) -> types.FunctionResponse:
+    """Build a FunctionResponse echoing the call's id (required by the Live API)."""
+    kwargs: dict = {"name": fn_call.name, "response": payload}
+    fn_id = getattr(fn_call, "id", None)
+    if fn_id:
+        kwargs["id"] = fn_id
+    else:
+        print(f"[FUNCTION CALL] warning: tool call '{fn_call.name}' had no id")
+    return types.FunctionResponse(**kwargs)
+
+
 async def audio_output(session, stop_event: asyncio.Event):
     accumulated_model_text=[]
     device_fx_fired = False  # at most one mid-stream device command per turn
@@ -481,14 +492,10 @@ async def audio_output(session, stop_event: asyncio.Event):
                         if fn_name == "stop_talking":
                             print("[STOP TOOL] ending session", flush=True)
                             should_stop = True
-                            pending_responses.append(
-                                types.FunctionResponse(name="stop_talking", response={"stopped": True})
-                            )
+                            pending_responses.append(_tool_response(fn_call, {"stopped": True}))
                         else:
                             result = await asyncio.to_thread(run_function_call, fn_name, fn_args)
-                            pending_responses.append(
-                                types.FunctionResponse(name=fn_name, response={"status": result})
-                            )
+                            pending_responses.append(_tool_response(fn_call, {"status": result}))
                     if pending_responses:
                         try:
                             await session.send_tool_response(function_responses=pending_responses)
