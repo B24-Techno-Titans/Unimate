@@ -13,6 +13,7 @@ import re
 import json
 import requests
 import multiprocessing
+from concurrent.futures import ThreadPoolExecutor
 from shared_utils.device_controls import control_humidifier
 # from Final_Codes.NLP.humidifier import set_humidifier
 
@@ -247,22 +248,25 @@ def extract_device_command(text: str):
     return None
 
 
+# Hardware calls (HTTP to devices, humidifier retry loop) can block for seconds.
+# They must never run on the audio event loop — submit them here instead.
+_DEVICE_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="device-cmd")
+
+
+def _device_command_job(cmd_string: str):
+    """Runs on a worker thread: parse + execute a device command, logging failures."""
+    try:
+        handle_device_command(cmd_string)
+    except Exception as e:
+        print(f"[DEVICE EXECUTOR] error: {e}")
+
+
 def handle_device_command(cmd_string: str):
     command = extract_device_command(cmd_string)
     if not command:
         return
     device, action = command
     print(f"\n⚡ [HARDWARE COMMAND]: {device} → {action}\n")
-
-    def send_http_request(url):
-        try:
-            print(f" Sending request to ESP32: {url}")
-            response = requests.get(url, timeout=3)
-            print(f"ESP32 Response Status: {response.status_code}")
-            return response
-        except requests.RequestException as e:
-            print(f"ESP32 Connection Failed: {e}")
-            return None
 
     if device == "fan":
         try:
@@ -379,7 +383,7 @@ async def audio_output(session, stop_event: asyncio.Event):
                     full_text = " ".join(accumulated_model_text)
                     accumulated_model_text.clear()
                     if full_text:
-                        handle_device_command(full_text)
+                        _DEVICE_EXECUTOR.submit(_device_command_job, full_text)
                         handle_emotion_command(full_text)
 
     except asyncio.CancelledError:
