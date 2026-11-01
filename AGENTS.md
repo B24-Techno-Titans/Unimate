@@ -8,15 +8,15 @@ UniMate: Raspberry Pi smart desk companion — Kivy touch UI, FastAPI bridge to 
 
 ## How to run (all on the Pi)
 
-Working directory matters — imports are flat/CWD-dependent. Wrong dir = `ImportError`.
+**Imports resolve via `~/unimate/bin/activate`'s `export PYTHONPATH=/home/unimate/Unimate:.../UIUX_FC2`, not the cwd** — flat/CWD-dependent imports (`from alexa import …`, `from dashboard import …`) work from anywhere with that venv, so always check `PYTHONPATH` when code "mysteriously" imports the wrong copy. For worktree testing `source ./use_worktree.sh` (sets PYTHONPATH to the worktree in the current shell).
 
 - **Start first** — bridge API (also serves `/mcqs`, `/get-questions`, `/summary`, camera endpoints):
   ```bash
-  cd Wifi && ~/unimate/bin/uvicorn raspi2:app --host 0.0.0.0 --port 5000
+  ~/unimate/bin/uvicorn raspi2:app --host 0.0.0.0 --port 5000   # from Wifi/
   ```
-  (run from `Wifi/` so `LED/` and `shared_utils/` imports resolve)
-- **Normal combined run**: `cd /home/unimate/Unimate && <venv-python> shared_mic/capture_server.py` — spawns three processes: mic capture server, `alexa/voiceAgent2_shared.py` (voice), and `UIUX_FC2.main.shared_start()` (UI). Run from repo root so `alexa` / `UIUX_FC2` resolve as packages.
-- **UI only**: `cd UIUX_FC2 && python3 main.py` (flat imports like `from dashboard import …`; `~/nlp/bin/python3` is the interpreter `run_hdmi.sh` prefers because of Kivy). Standalone launch = no shared audio queue, so voice quiz input is limited.
+  (raspi2.py itself puts `LED/` on `sys.path`; `shared_utils`/`Livefeed` come from PYTHONPATH)
+- **Normal combined run**: `cd /home/unimate/Unimate && <venv-python> shared_mic/capture_server.py` — spawns three processes: mic capture server, `alexa/voiceAgent2_shared.py` (voice), and `UIUX_FC2.main.shared_start()` (UI).
+- **UI only**: `cd UIUX_FC2 && python3 main.py` (`~/nlp/bin/python3` is the interpreter `run_hdmi.sh` prefers because of Kivy). Standalone launch = no shared audio queue, so voice quiz input is limited.
 - Deps install: `bash Requirements/install_requirements.sh` (uses `~/unimate/bin/pip` + piwheels; retry failures with `install_requirements_resume.sh`). Hardware-only deps (RPi.GPIO, etc.) can't install off-Pi.
 
 ## Mic sharing & cross-process JSON signaling
