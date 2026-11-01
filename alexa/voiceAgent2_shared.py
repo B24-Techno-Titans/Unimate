@@ -11,6 +11,7 @@ from openwakeword.model import Model
 from collections import deque
 import re
 import json
+import queue
 import requests
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
@@ -115,6 +116,7 @@ bot_instruction = """
 SILENCE_TIMEOUT = 15
 SILENCE_THRESHOLD = 600
 PRE_BUFFER_SECONDS = 2
+BATCH_CHUNKS = 4  # mic chunks (~80 ms each) merged into one upstream Gemini send
 
 FORMAT   = pyaudio.paInt16
 CHANNELS = 1
@@ -174,10 +176,9 @@ def listen_for_wake_word_or_trigger() -> list:
     chunks_per_second = RATE // CHUNK
     pre_buffer = deque(maxlen=PRE_BUFFER_SECONDS * chunks_per_second)
 
-    # Warm-up: feed silent chunks so the model state is clean
-    silent_chunk = np.zeros(CHUNK, dtype=np.int16)
-    for _ in range(30):
-        wake_model.predict(silent_chunk)
+    # Warm-up: the ONNX model was warmed once at process start;
+    # reset its streaming state so every session starts clean.
+    wake_model.reset()
 
     while True:
         try:
@@ -328,19 +329,28 @@ async def audio_input(session, stop_event: asyncio.Event, pre_buffer: list):
                 last_audio_time = time.time()
                 continue
 
-            if data:
-                if is_silent(data):
-                    if time.time() - last_audio_time > SILENCE_TIMEOUT:
-                        print("Silence timeout. Ending session...")
-                        stop_event.set()
-                        break
-                else:
-                    last_audio_time = time.time()
+            if not data:
+                continue
 
-                await session.send_realtime_input(
-                    audio=types.Blob(data=data, mime_type="audio/pcm;rate=16000")
-                )
-                await asyncio.sleep(0.001)
+            # Batch: the blocking chunk plus whatever else is already queued —
+            # one upstream round-trip per ~BATCH_CHUNKS chunks instead of one per chunk.
+            batch = [data]
+            for _ in range(BATCH_CHUNKS - 1):
+                try:
+                    batch.append(input_queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            if not is_silent(batch[-1]):
+                last_audio_time = time.time()
+            elif time.time() - last_audio_time > SILENCE_TIMEOUT:
+                print("Silence timeout. Ending session...")
+                stop_event.set()
+                break
+
+            await session.send_realtime_input(
+                audio=types.Blob(data=b"".join(batch), mime_type="audio/pcm;rate=16000")
+            )
 
     except asyncio.CancelledError:
         pass
@@ -539,6 +549,11 @@ def shared_start(audio_queue):
     p = pyaudio.PyAudio()
     output_stream = make_output_stream()
     wake_model = Model(wakeword_model_paths=[str(model_path)])
+    # Warm up ONNX inference once per process (first predict() is JIT/lazy-slow).
+    # Later sessions just reset() the state — see listen_for_wake_word_or_trigger.
+    silent_chunk = np.zeros(CHUNK, dtype=np.int16)
+    for _ in range(30):
+        wake_model.predict(silent_chunk)
     try:
         asyncio.run(main())
     finally:
