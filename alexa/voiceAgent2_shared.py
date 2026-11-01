@@ -86,8 +86,7 @@ bot_instruction = """
     ### 5. Device Control
     You can control a fan, a table light, and a humidifier connected to the user's desk.
     When the user asks to control a device, do TWO things:
-    1. Respond naturally in your cute voice persona as usual.
-    2. At the very end of your response, on a new line, emit a hardware command tag like this:
+    1. FIRST, as the very first characters of your response, emit the hardware command tag like this:
 
     [CMD:device=fan,action=on]
     [CMD:device=fan,action=off]
@@ -96,11 +95,13 @@ bot_instruction = """
     [CMD:device=humidifier,action=on]
     [CMD:device=humidifier,action=off]
 
+    2. Then respond naturally in your cute voice persona as usual.
+
     Hardware Command-tag format is strict:
-    - Use exactly one command tag line at the end.
+    - Use exactly one command tag line at the start of the response, before any other words (the only exception: an emotion tag may directly follow it).
     - Use only lowercase for device and action.
     - Never add spaces inside the tag.
-    - Never include any text after the hardware command tag line.
+    - Never place the tag at the end of the response or mid-sentence.
 
     Only emit a hardware command tag when the user clearly wants to control a device.
     Never speak any command tags out loud — they are silent metadata only.
