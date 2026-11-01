@@ -220,17 +220,20 @@ def play_beep(frequency=880, duration=0.2, volume=0.5):
     wave = (np.sin(2 * np.pi * frequency * t) * volume * 32767).astype(np.int16)
     output_stream.write(wave.tobytes())
 
-def handle_emotion_command(text: str):
+def handle_emotion_command(text: str) -> bool:
+    """Write a [CMD:emotion=...] tag to the UI emotion file. Returns True if one was present."""
     pattern = r"\[CMD:emotion=(happy|sad|angry)\]"
     match = re.search(pattern, text, flags=re.IGNORECASE)
-    if match:
-        emotion = match.group(1).lower()
-        print(f"[EMOTION]: {emotion}")
-        try:
-            with open(EMOTION_STATE_PATH, "w") as f:
-                json.dump({"emotion": emotion, "timestamp": time.time()}, f)
-        except OSError as e:
-            print(f"Failed to write emotion: {e}")
+    if not match:
+        return False
+    emotion = match.group(1).lower()
+    print(f"[EMOTION]: {emotion}")
+    try:
+        with open(EMOTION_STATE_PATH, "w") as f:
+            json.dump({"emotion": emotion, "timestamp": time.time()}, f)
+    except OSError as e:
+        print(f"Failed to write emotion: {e}")
+    return True
 
 
 def extract_device_command(text: str):
@@ -346,6 +349,25 @@ async def audio_input(session, stop_event: asyncio.Event, pre_buffer: list):
 
 async def audio_output(session, stop_event: asyncio.Event):
     accumulated_model_text=[]
+    device_fx_fired = False  # at most one mid-stream device command per turn
+    emotion_fx_fired = False  # at most one mid-stream emotion per turn
+
+    def _collect_model_text(text: str):
+        """Append a model text chunk and fire the device/emotion commands as
+        soon as the full [CMD:...] tags are detectable in the joined text —
+        the tags may be split across chunk boundaries."""
+        nonlocal device_fx_fired, emotion_fx_fired
+        accumulated_model_text.append(text)
+        joined = " ".join(accumulated_model_text)
+        if not device_fx_fired and extract_device_command(joined):
+            device_fx_fired = True
+            _DEVICE_EXECUTOR.submit(_device_command_job, joined)
+            print("[DEVICE FX] fired mid-stream from transcription", flush=True)
+        # Emotion is a tiny local JSON write — safe on the audio loop.
+        if not emotion_fx_fired and handle_emotion_command(joined):
+            emotion_fx_fired = True
+            print("[EMOTION FX] fired mid-stream from transcription", flush=True)
+
     try:
         while not stop_event.is_set():
             async for response in session.receive():
@@ -364,8 +386,7 @@ async def audio_output(session, stop_event: asyncio.Event):
                 if server_content.output_transcription and server_content.output_transcription.text:
                     model_text = server_content.output_transcription.text
                     print(f"Model said: {model_text!r}", flush=True)
-                    accumulated_model_text.append(model_text)
-                    # handle_device_command(model_text)
+                    _collect_model_text(model_text)
 
                 if server_content.model_turn is not None:
                     for part in server_content.model_turn.parts:
@@ -374,8 +395,7 @@ async def audio_output(session, stop_event: asyncio.Event):
                             await asyncio.to_thread(output_stream.write, part.inline_data.data)
                         if part.text:
                             print(f"Text: {part.text!r}", flush=True)
-                            # handle_device_command(part.text)
-                            accumulated_model_text.append(part.text)
+                            _collect_model_text(part.text)
 
                 if server_content.turn_complete:
                     is_speaking.clear()
@@ -383,8 +403,13 @@ async def audio_output(session, stop_event: asyncio.Event):
                     full_text = " ".join(accumulated_model_text)
                     accumulated_model_text.clear()
                     if full_text:
-                        _DEVICE_EXECUTOR.submit(_device_command_job, full_text)
-                        handle_emotion_command(full_text)
+                        # Fallbacks: only run if the mid-stream scan didn't already fire.
+                        if not device_fx_fired:
+                            _DEVICE_EXECUTOR.submit(_device_command_job, full_text)
+                        if not emotion_fx_fired:
+                            handle_emotion_command(full_text)
+                    device_fx_fired = False
+                    emotion_fx_fired = False
 
     except asyncio.CancelledError:
         pass
