@@ -14,8 +14,9 @@ _current_fan_speed = -1
 auto_humid_on = False
 _current_humid_level = -1
 # Last *requested* light values (pre-clamp) — used for /device-state reporting so
-# the UI can show what the user/model asked for, matching the 0-100 device clamp
-# that control_light enforces on the actual hardware request.
+# the UI can show what the user/model asked for. Brightness is on the 0-255
+# firmware scale. Only valid (6-digit hex, lowercased, "#"-prefixed) colours are
+# recorded and sent to the hardware.
 _current_light_rgb = None
 _current_light_brightness = None
 
@@ -50,25 +51,47 @@ def control_light(**kwargs):
     params = {}
     colour = kwargs.get("rgb", None)
     if colour is not None:
-        _current_light_rgb = str(colour)
+        # Normalise and actually send the colour — the firmware (firmware/led.ino
+        # hexToRGB) requires "#rrggbb" and falls back to black otherwise. requests
+        # URL-encodes the "#" as %23, matching the working curl form.
+        rgb_hex = normalise_rgb_hex(colour)
+        if rgb_hex is not None:
+            _current_light_rgb = rgb_hex
+            params["rgb"] = rgb_hex
     brightness = kwargs.get("brightness", None)
     if brightness is not None:
+        # Firmware scale is 0-255 (led.ino constrains brightness to 0-255),
+        # same scale the UI and voice agent use.
+        brightness = max(0, min(255, int(brightness)))
         _current_light_brightness = int(brightness)
-        params["brightness"] = min(brightness, 100) # limit to 100 for low power usage
+        params["brightness"] = brightness
 
     try:
         response = requests.get(LED_URL, params=params, timeout=5)
         # print("Request: ", response.request.url)
         
         if response.status_code == 200:
-            # print("Colour change requested successfully")
-            # print("ESP32 says:", response.text)
+            print("Colour change requested successfully")
+            print("ESP32 says:", response.text)
             pass
         else:
             print(f"Failed with status code: {response.status_code}")
 
     except requests.exceptions.RequestException as e:
         print(f"Connection Error: {e}")
+
+def normalise_rgb_hex(colour):
+    """Normalise a colour like '#ff8800', 'ff8800' or '#FF8800' to lowercase hex without '#'.
+
+    Returns None if the input isn't a 6-digit hex colour. Callers then decide
+    what to do (e.g. keep the previous colour or fall back to white).
+    """
+    if colour is None:
+        return None
+    value = str(colour).strip().lstrip("#").lower()
+    if len(value) == 6 and all(c in "0123456789abcdef" for c in value):
+        return "#%s" % value
+    return None
 
 # -------------- State snapshot for cross-process sync --------------
 def device_state() -> dict:

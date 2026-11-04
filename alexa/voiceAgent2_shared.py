@@ -140,7 +140,7 @@ TOOL_INSTRUCTIONS = """
     call the stop_talking tool immediately. Do not say anything before or after it.
     """
 
-SILENCE_TIMEOUT = 15
+SILENCE_TIMEOUT = 25
 SILENCE_THRESHOLD = 600
 PRE_BUFFER_SECONDS = 2
 BATCH_CHUNKS = 4  # mic chunks (~80 ms each) merged into one upstream Gemini send

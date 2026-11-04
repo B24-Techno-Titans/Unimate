@@ -5,7 +5,11 @@ TIMEOUT = 5  # seconds
 
 def rgb_to_hex(colour):
     r, g, b = colour
-    return f"%23{r:02X}{g:02X}{b:02X}"
+    # Plain "#rrggbb" — when passed via requests params=, the "#" gets
+    # URL-encoded as %23, which is the form the firmware expects
+    # (hexToRGB requires 7 chars starting with "#"). Pre-encoding the "#" as
+    # "%23" here would get double-encoded to "%2523" by requests and rejected.
+    return f"#{r:02X}{g:02X}{b:02X}"
 
 def changeLedState(**kwargs): # colour -> (r, g, b) tuple
     params = {}
