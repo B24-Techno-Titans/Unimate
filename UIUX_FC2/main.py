@@ -81,6 +81,7 @@ from raspi_bridge import (  # noqa: E402
 )
 from emotions.morph import RoboMorphWidget  # noqa: E402
 from emotions.selector import build_emotion_screen  # noqa: E402
+from screens.music_screen import build_music_screen  # noqa: E402
 from theme import Theme  # noqa: E402
 from nlp_functions import set_shared_audio_queue  # noqa: E402
 from widgets.common import write_mic_in_use  # noqa: E402
@@ -114,15 +115,17 @@ def _silence_probesysfs_xinput_warnings() -> None:
 
 _silence_probesysfs_xinput_warnings()
 
-SCREEN_ORDER = ("study", "face", "sensors", "controls")
+SCREEN_ORDER = ("music", "study", "face", "sensors", "controls")
 
-# Touch: Study ← Face → Sensors → Controls. Swipe left (dx < 0) → next; right → previous.
+# Touch: Music—Study—Face—Sensors—Controls. Swipe left (dx < 0) → next; right → previous.
 _SWIPE_PREV = {
+    "study": "music",
     "face": "study",
     "sensors": "face",
     "controls": "sensors",
 }
 _SWIPE_NEXT = {
+    "music": "study",
     "study": "face",
     "face": "sensors",
     "sensors": "controls",
@@ -131,7 +134,7 @@ _SWIPE_NEXT = {
 IDLE_FACE_TIMEOUT_S = 120.0
 
 class FourScreenSwipeManager(ScreenManager):
-    """Horizontal swipe: Study—Face—Sensors—Controls (no chrome)."""
+    """Horizontal swipe: Music—Study—Face—Sensors—Controls (no chrome)."""
 
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -209,6 +212,9 @@ class UniMateKivyUI(BoxLayout):
             transition=SlideTransition(duration=0.22),
             size_hint=(1, 1)
         )
+
+        music = build_music_screen()
+        self.manager.add_widget(music)
 
         study = build_study_screen()
         self.manager.add_widget(study)
