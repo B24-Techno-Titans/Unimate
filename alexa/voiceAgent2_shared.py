@@ -11,9 +11,11 @@ from openwakeword.model import Model
 from collections import deque
 import re
 import json
+import queue
 import requests
 import multiprocessing
-from shared_utils.device_controls import control_humidifier
+from concurrent.futures import ThreadPoolExecutor
+from shared_utils.device_controls import control_fan, control_humidifier, control_light
 # from Final_Codes.NLP.humidifier import set_humidifier
 
 # LED URLs
@@ -82,11 +84,19 @@ bot_instruction = """
     - You are bunny. You are a physical hardware device sitting on the user's desk.
     - Keep your answers highly accurate, especially for educational topics, math, or coding.
 
+    - Note to model: The user might speak or ask questions in a mix of English and Sinhala (Singlish) or any other language.
+    Respond naturally in the same language style they use, while strictly keeping the cute persona and mood constraints.
+    However, your default language should be English
+    """
+
+# Device-control guidance depends on whether native function calling is enabled.
+USE_TOOLS = False  # False = fall back to the [CMD:device=...] text-tag protocol
+
+TAG_DEVICE_INSTRUCTIONS = """
     ### 5. Device Control
     You can control a fan, a table light, and a humidifier connected to the user's desk.
     When the user asks to control a device, do TWO things:
-    1. Respond naturally in your cute voice persona as usual.
-    2. At the very end of your response, on a new line, emit a hardware command tag like this:
+    1. FIRST, as the very first characters of your response, emit the hardware command tag like this:
 
     [CMD:device=fan,action=on]
     [CMD:device=fan,action=off]
@@ -95,24 +105,45 @@ bot_instruction = """
     [CMD:device=humidifier,action=on]
     [CMD:device=humidifier,action=off]
 
+    2. Then respond naturally in your cute voice persona as usual.
+
     Hardware Command-tag format is strict:
-    - Use exactly one command tag line at the end.
+    - Use exactly one command tag line at the start of the response, before any other words (the only exception: an emotion tag may directly follow it).
     - Use only lowercase for device and action.
     - Never add spaces inside the tag.
-    - Never include any text after the hardware command tag line.
+    - Never place the tag at the end of the response or mid-sentence.
 
     Only emit a hardware command tag when the user clearly wants to control a device.
     Never speak any command tags out loud — they are silent metadata only.
     If no device control is needed, do not emit any hardware command tag.
 
-    - Note to model: The user might speak or ask questions in a mix of English and Sinhala (Singlish) or any other language.
-    Respond naturally in the same language style they use, while strictly keeping the cute persona and mood constraints.
-    However, your default language should be English
+    ### 6. Stopping Yourself
+    When the user asks you to stop, be quiet, shut up, or end the conversation —
+    reply with ONLY this tag and no other words:
+    [CMD:stop]
+    Never say anything else in that response.
+    """
+
+TOOL_INSTRUCTIONS = """
+    ### 5. Device Control (use the provided tools)
+    You control the desk hardware through tools: set_fan, set_light, set_humidifier.
+    - Call the matching tool as soon as the user clearly asks to control a device.
+    - set_fan: speed 0 = off, 1 = low, 2 = fast.
+    - set_light: on=true to light up (brightness 0-100, optional hex color like "#ff8800"), on=false to turn off.
+    - set_humidifier: level 0 = off, 1 = on.
+    - After the tool call, respond naturally in your cute voice persona as usual.
+    - Only call a device tool when the user clearly wants to control a device.
+    - Do NOT write out any command tags like [CMD:device=...] — with tools enabled they are forbidden.
+
+    ### 6. Stopping Yourself
+    When the user asks you to stop, be quiet, shut up, or end this conversation —
+    call the stop_talking tool immediately. Do not say anything before or after it.
     """
 
 SILENCE_TIMEOUT = 15
 SILENCE_THRESHOLD = 600
 PRE_BUFFER_SECONDS = 2
+BATCH_CHUNKS = 4  # mic chunks (~80 ms each) merged into one upstream Gemini send
 
 FORMAT   = pyaudio.paInt16
 CHANNELS = 1
@@ -172,10 +203,9 @@ def listen_for_wake_word_or_trigger() -> list:
     chunks_per_second = RATE // CHUNK
     pre_buffer = deque(maxlen=PRE_BUFFER_SECONDS * chunks_per_second)
 
-    # Warm-up: feed silent chunks so the model state is clean
-    silent_chunk = np.zeros(CHUNK, dtype=np.int16)
-    for _ in range(30):
-        wake_model.predict(silent_chunk)
+    # Warm-up: the ONNX model was warmed once at process start;
+    # reset its streaming state so every session starts clean.
+    wake_model.reset()
 
     while True:
         try:
@@ -219,17 +249,27 @@ def play_beep(frequency=880, duration=0.2, volume=0.5):
     wave = (np.sin(2 * np.pi * frequency * t) * volume * 32767).astype(np.int16)
     output_stream.write(wave.tobytes())
 
-def handle_emotion_command(text: str):
+def handle_emotion_command(text: str) -> bool:
+    """Write a [CMD:emotion=...] tag to the UI emotion file. Returns True if one was present."""
     pattern = r"\[CMD:emotion=(happy|sad|angry)\]"
     match = re.search(pattern, text, flags=re.IGNORECASE)
-    if match:
-        emotion = match.group(1).lower()
-        print(f"[EMOTION]: {emotion}")
-        try:
-            with open(EMOTION_STATE_PATH, "w") as f:
-                json.dump({"emotion": emotion, "timestamp": time.time()}, f)
-        except OSError as e:
-            print(f"Failed to write emotion: {e}")
+    if not match:
+        return False
+    emotion = match.group(1).lower()
+    print(f"[EMOTION]: {emotion}")
+    try:
+        with open(EMOTION_STATE_PATH, "w") as f:
+            json.dump({"emotion": emotion, "timestamp": time.time()}, f)
+    except OSError as e:
+        print(f"Failed to write emotion: {e}")
+    return True
+
+
+def extract_stop_command(text: str) -> bool:
+    """True if text contains the silent [CMD:stop] tag."""
+    if not text:
+        return False
+    return bool(re.search(r"\[\s*CMD\s*:\s*stop\s*\]", text, flags=re.IGNORECASE))
 
 
 def extract_device_command(text: str):
@@ -247,6 +287,116 @@ def extract_device_command(text: str):
     return None
 
 
+# Hardware calls (HTTP to devices, humidifier retry loop) can block for seconds.
+# They must never run on the audio event loop — submit them here instead.
+_DEVICE_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="device-cmd")
+
+# Suppress a repeated device command within this window (tag fallback + tool call
+# deciding to fire for the same intent must not act twice).
+_DEVICE_DEDUPE_S = 8
+_device_last_run: dict = {}
+
+# Device commands go through the bridge (same endpoints the UI uses) so the UI,
+# the bridge auto-loops and the voice agent share one source of truth for device
+# state. If the bridge is unreachable (standalone testing), fall back to the
+# direct hardware calls — they still work, just without UI sync.
+BRIDGE_URL = os.environ.get("UNIMATE_RASPI_BRIDGE_URL", "http://127.0.0.1:5000").rstrip("/")
+BRIDGE_TIMEOUT_S = 4
+
+
+def _bridge_post(path: str, payload: dict) -> bool:
+    """POST a device command to the bridge. Returns False if unreachable/rejected."""
+    try:
+        r = requests.post(f"{BRIDGE_URL}{path}", json=payload, timeout=BRIDGE_TIMEOUT_S)
+        if r.status_code >= 400:
+            print(f"[BRIDGE] {path} rejected: HTTP {r.status_code}")
+            return False
+        return True
+    except requests.RequestException as e:
+        print(f"[BRIDGE] {path} unreachable — direct fallback ({e.__class__.__name__})")
+        return False
+
+
+def _bridge_get_state() -> dict | None:
+    """Fetch the bridge's current device state snapshot (or None)."""
+    try:
+        r = requests.get(f"{BRIDGE_URL}/device-state", timeout=BRIDGE_TIMEOUT_S)
+        if r.status_code < 400:
+            data = r.json()
+            return data if isinstance(data, dict) else None
+    except (requests.RequestException, ValueError):
+        pass
+    return None
+
+
+def _bridge_set_fan(speed: int) -> None:
+    speed = max(0, min(2, int(speed)))
+    if not _bridge_post("/set-fan", {"fanSpeed": speed, "autoFan": False}):
+        control_fan(speed)  # bridge down: act anyway (won't sync the UI)
+
+
+def run_function_call(name: str, args: dict) -> str:
+    """Execute a Gemini tool call on the device executor thread. Returns a status string."""
+    try:
+        if name == "set_fan":
+            speed = int(args.get("speed", 0))
+            print(f"[TOOL] set_fan speed={speed}")
+            _bridge_set_fan(speed)
+            return "ok"
+        if name == "set_light":
+            on = bool(args.get("on", True))
+            if on:
+                brightness_100 = max(0, min(100, int(args.get("brightness", 60))))
+                color = str(args.get("color") or "").lstrip("#").lower()
+                if len(color) != 6:
+                    # No colour asked for: keep whatever is already on the strip.
+                    state = _bridge_get_state() or {}
+                    color = str(state.get("light_rgb") or "ffffff").lower()
+                    if len(color) != 6:
+                        color = "ffffff"
+                print(f"[TOOL] set_light on {color} @{brightness_100}")
+                if not _bridge_post(
+                    "/set-lights",
+                    {
+                        "light": color,
+                        "brightness": min(255, round(brightness_100 * 2.55)),
+                        "autoLight": False,
+                    },
+                ):
+                    control_light(rgb=color, brightness=brightness_100)
+            else:
+                print("[TOOL] set_light off")
+                if not _bridge_post("/set-lights", {"light": "000000", "brightness": 0, "autoLight": False}):
+                    control_light(rgb="000000", brightness=0)
+            return "ok"
+        if name == "set_humidifier":
+            level = int(args.get("level", 1))
+            print(f"[TOOL] set_humidifier level={level}")
+            if not _bridge_post("/set-humid", {"level": 1 if level else 0, "autoHumid": False}):
+                control_humidifier(1 if level else 0)
+            return "ok"
+        return f"unknown tool: {name}"
+    except Exception as e:
+        print(f"[TOOL] {name} failed: {e}")
+        return f"error: {e}"
+
+
+def _device_command_job(cmd_string: str):
+    """Runs on a worker thread: parse + execute a device command, logging failures."""
+    try:
+        command = extract_device_command(cmd_string)
+        if not command:
+            return
+        now = time.time()
+        if now - _device_last_run.get(command, 0.0) < _DEVICE_DEDUPE_S:
+            print(f"[DEVICE DEDUPE] suppressed repeat of {command} within {_DEVICE_DEDUPE_S}s")
+            return
+        _device_last_run[command] = now
+        handle_device_command(cmd_string)
+    except Exception as e:
+        print(f"[DEVICE EXECUTOR] error: {e}")
+
+
 def handle_device_command(cmd_string: str):
     command = extract_device_command(cmd_string)
     if not command:
@@ -254,24 +404,12 @@ def handle_device_command(cmd_string: str):
     device, action = command
     print(f"\n⚡ [HARDWARE COMMAND]: {device} → {action}\n")
 
-    def send_http_request(url):
-        try:
-            print(f" Sending request to ESP32: {url}")
-            response = requests.get(url, timeout=3)
-            print(f"ESP32 Response Status: {response.status_code}")
-            return response
-        except requests.RequestException as e:
-            print(f"ESP32 Connection Failed: {e}")
-            return None
-
     if device == "fan":
         try:
-            if action == "on":
-                print("Turning FAN ON")
-                requests.get(FAN_ON_URL, timeout=3)
-            else:
-                print("Turning FAN OFF")
-                requests.get(FAN_OFF_URL, timeout=3)
+            speed = 2 if action == "on" else 0
+            print(f"Setting FAN to speed {speed}")
+            if not _bridge_post("/set-fan", {"fanSpeed": speed, "autoFan": False}):
+                requests.get(FAN_ON_URL if action == "on" else FAN_OFF_URL, timeout=3)
         except requests.RequestException as e:
             print(f"FAN {action.upper()} request failed:", e)
 
@@ -279,23 +417,20 @@ def handle_device_command(cmd_string: str):
         try:
             if action == "on":
                 print("Turning LIGHT ON")
-               
-                requests.get(LED_ON_URL, timeout=3)
-                    
+                if not _bridge_post("/set-lights", {"light": "113456", "brightness": 200, "autoLight": False}):
+                    requests.get(LED_ON_URL, timeout=3)
             else:
                 print("Turning LIGHT OFF")
-                requests.get(LED_OFF_URL, timeout=3)
+                if not _bridge_post("/set-lights", {"light": "000000", "brightness": 0, "autoLight": False}):
+                    requests.get(LED_OFF_URL, timeout=3)
         except requests.RequestException as e:
             print(f"LIGHT {action.upper()} request failed:", e)
-            
-    elif device == "humidifier": 
+
+    elif device == "humidifier":
         print(f"Setting HUMIDIFIER to {action.upper()}")
-        if action == "on":
-            # print("Turning HUMIDIFIER ON")
-            control_humidifier(1)
-        else:
-            # print("Turning HUMIDIFIER OFF")
-            control_humidifier(0)
+        level = 1 if action == "on" else 0
+        if not _bridge_post("/set-humid", {"level": level, "autoHumid": False}):
+            control_humidifier(level)
 
 
 async def audio_input(session, stop_event: asyncio.Event, pre_buffer: list):
@@ -320,19 +455,28 @@ async def audio_input(session, stop_event: asyncio.Event, pre_buffer: list):
                 last_audio_time = time.time()
                 continue
 
-            if data:
-                if is_silent(data):
-                    if time.time() - last_audio_time > SILENCE_TIMEOUT:
-                        print("Silence timeout. Ending session...")
-                        stop_event.set()
-                        break
-                else:
-                    last_audio_time = time.time()
+            if not data:
+                continue
 
-                await session.send_realtime_input(
-                    audio=types.Blob(data=data, mime_type="audio/pcm;rate=16000")
-                )
-                await asyncio.sleep(0.001)
+            # Batch: the blocking chunk plus whatever else is already queued —
+            # one upstream round-trip per ~BATCH_CHUNKS chunks instead of one per chunk.
+            batch = [data]
+            for _ in range(BATCH_CHUNKS - 1):
+                try:
+                    batch.append(input_queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            if not is_silent(batch[-1]):
+                last_audio_time = time.time()
+            elif time.time() - last_audio_time > SILENCE_TIMEOUT:
+                print("Silence timeout. Ending session...")
+                stop_event.set()
+                break
+
+            await session.send_realtime_input(
+                audio=types.Blob(data=b"".join(batch), mime_type="audio/pcm;rate=16000")
+            )
 
     except asyncio.CancelledError:
         pass
@@ -340,13 +484,74 @@ async def audio_input(session, stop_event: asyncio.Event, pre_buffer: list):
         print(f"Error in audio_input: {e}")
 
 
+def _tool_response(fn_call, payload: dict) -> types.FunctionResponse:
+    """Build a FunctionResponse echoing the call's id (required by the Live API)."""
+    kwargs: dict = {"name": fn_call.name, "response": payload}
+    fn_id = getattr(fn_call, "id", None)
+    if fn_id:
+        kwargs["id"] = fn_id
+    else:
+        print(f"[FUNCTION CALL] warning: tool call '{fn_call.name}' had no id")
+    return types.FunctionResponse(**kwargs)
+
+
 async def audio_output(session, stop_event: asyncio.Event):
     accumulated_model_text=[]
+    device_fx_fired = False  # at most one mid-stream device command per turn
+    emotion_fx_fired = False  # at most one mid-stream emotion per turn
+
+    def _collect_model_text(text: str):
+        """Append a model text chunk and fire the device/emotion commands as
+        soon as the full [CMD:...] tags are detectable in the joined text —
+        the tags may be split across chunk boundaries."""
+        nonlocal device_fx_fired, emotion_fx_fired
+        accumulated_model_text.append(text)
+        joined = " ".join(accumulated_model_text)
+        if not device_fx_fired and extract_device_command(joined):
+            device_fx_fired = True
+            _DEVICE_EXECUTOR.submit(_device_command_job, joined)
+            print("[DEVICE FX] fired mid-stream from transcription", flush=True)
+        # Emotion is a tiny local JSON write — safe on the audio loop.
+        if not emotion_fx_fired and handle_emotion_command(joined):
+            emotion_fx_fired = True
+            print("[EMOTION FX] fired mid-stream from transcription", flush=True)
+        # [CMD:stop] tag (tag mode) — end the session immediately, runs in both modes.
+        if extract_stop_command(joined):
+            print("[STOP TAG] ending session", flush=True)
+            is_speaking.clear()
+            stop_event.set()
+
     try:
         while not stop_event.is_set():
             async for response in session.receive():
                 if stop_event.is_set():
                     return  # exit immediately when session ends
+
+                # Native function-call messages (server_content may be None here)
+                tool_call = response.tool_call
+                if tool_call and tool_call.function_calls:
+                    pending_responses = []
+                    should_stop = False
+                    for fn_call in tool_call.function_calls:
+                        fn_name = fn_call.name or ""
+                        fn_args = dict(fn_call.args or {})
+                        print(f"[FUNCTION CALL] {fn_name} {fn_args}", flush=True)
+                        if fn_name == "stop_talking":
+                            print("[STOP TOOL] ending session", flush=True)
+                            should_stop = True
+                            pending_responses.append(_tool_response(fn_call, {"stopped": True}))
+                        else:
+                            result = await asyncio.to_thread(run_function_call, fn_name, fn_args)
+                            pending_responses.append(_tool_response(fn_call, {"status": result}))
+                    if pending_responses:
+                        try:
+                            await session.send_tool_response(function_responses=pending_responses)
+                        except Exception as e:
+                            print(f"[FUNCTION CALL] failed to send response: {e}")
+                    if should_stop:
+                        is_speaking.clear()
+                        stop_event.set()
+                    continue
 
                 server_content = response.server_content
                 if server_content is None:
@@ -360,8 +565,7 @@ async def audio_output(session, stop_event: asyncio.Event):
                 if server_content.output_transcription and server_content.output_transcription.text:
                     model_text = server_content.output_transcription.text
                     print(f"Model said: {model_text!r}", flush=True)
-                    accumulated_model_text.append(model_text)
-                    # handle_device_command(model_text)
+                    _collect_model_text(model_text)
 
                 if server_content.model_turn is not None:
                     for part in server_content.model_turn.parts:
@@ -370,8 +574,7 @@ async def audio_output(session, stop_event: asyncio.Event):
                             await asyncio.to_thread(output_stream.write, part.inline_data.data)
                         if part.text:
                             print(f"Text: {part.text!r}", flush=True)
-                            # handle_device_command(part.text)
-                            accumulated_model_text.append(part.text)
+                            _collect_model_text(part.text)
 
                 if server_content.turn_complete:
                     is_speaking.clear()
@@ -379,13 +582,91 @@ async def audio_output(session, stop_event: asyncio.Event):
                     full_text = " ".join(accumulated_model_text)
                     accumulated_model_text.clear()
                     if full_text:
-                        handle_device_command(full_text)
-                        handle_emotion_command(full_text)
+                        # Fallbacks: only run if the mid-stream scan didn't already fire.
+                        if not device_fx_fired:
+                            _DEVICE_EXECUTOR.submit(_device_command_job, full_text)
+                        if not emotion_fx_fired:
+                            handle_emotion_command(full_text)
+                        if extract_stop_command(full_text) and not stop_event.is_set():
+                            print("[STOP TAG] caught at turn end", flush=True)
+                            is_speaking.clear()
+                            stop_event.set()
+                    device_fx_fired = False
+                    emotion_fx_fired = False
 
     except asyncio.CancelledError:
         pass
     except Exception as e:
         print(f"Error in audio_output: {e}")
+
+DEVICE_TOOLS = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name="set_fan",
+            description="Set the speed of the desk fan.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "speed": types.Schema(
+                        type=types.Type.INTEGER,
+                        description="0 = off, 1 = low, 2 = fast",
+                    ),
+                },
+                required=["speed"],
+            ),
+        ),
+        types.FunctionDeclaration(
+            name="set_light",
+            description="Control the desk light strip.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "on": types.Schema(type=types.Type.BOOLEAN, description="true to turn on, false to turn off"),
+                    "brightness": types.Schema(type=types.Type.INTEGER, description="0-100, used when turning on"),
+                    "color": types.Schema(type=types.Type.STRING, description='Optional hex color like "#ff8800"'),
+                },
+                required=["on"],
+            ),
+        ),
+        types.FunctionDeclaration(
+            name="set_humidifier",
+            description="Turn the desk humidifier on or off.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "level": types.Schema(type=types.Type.INTEGER, description="0 = off, 1 = on"),
+                },
+                required=["level"],
+            ),
+        ),
+        types.FunctionDeclaration(
+            name="stop_talking",
+            description="Call this immediately when the user asks to stop, be quiet, shut up, or end the conversation. Never speak after calling it.",
+        ),
+    ]
+)
+
+
+def _build_live_config(system_instruction_text: str) -> types.LiveConnectConfig:
+    """LiveConnectConfig with the persona instructions; adds the device tools when USE_TOOLS."""
+    kwargs: dict = dict(
+        response_modalities=["AUDIO"],
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig(),
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Fenrir")
+            )
+        ),
+        system_instruction=types.Content(
+            parts=[types.Part.from_text(text=system_instruction_text)]
+        ),
+    )
+    if USE_TOOLS:
+        kwargs["tools"] = [DEVICE_TOOLS]
+    return types.LiveConnectConfig(**kwargs)
+
 
 ui_restart_requested = False
 
@@ -394,8 +675,9 @@ async def run_session(pre_buffer: list):
     session_active = True
     is_speaking.clear()
 
-    dynamic_instruction =bot_instruction
-    json_path="/home/unimate/Unimate/pdf_mode/pdf_mode_status.json"
+    device_instructions = TOOL_INSTRUCTIONS if USE_TOOLS else TAG_DEVICE_INSTRUCTIONS
+    dynamic_instruction = bot_instruction + device_instructions
+    json_path = os.path.join(os.path.dirname(__file__), os.pardir, "pdf_mode", "pdf_mode_status.json")
 
     client   = genai.Client(api_key=api_key)
     model_id = "gemini-2.5-flash-native-audio-latest"
@@ -422,20 +704,7 @@ async def run_session(pre_buffer: list):
         print(f"Error loading PDF context: {e}")
         print("Continuing without PDF context...")
 
-    config = types.LiveConnectConfig(
-        response_modalities=["AUDIO"],
-        thinking_config=types.ThinkingConfig(thinking_budget=0),
-        input_audio_transcription=types.AudioTranscriptionConfig(),
-        output_audio_transcription=types.AudioTranscriptionConfig(),
-        speech_config=types.SpeechConfig(
-            voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Fenrir")
-            )
-        ),
-        system_instruction=types.Content(
-            parts=[types.Part.from_text(text=dynamic_instruction)]
-        )
-    )
+    config = _build_live_config(dynamic_instruction)
 
     print("Starting Gemini session...")
     try:
@@ -509,6 +778,11 @@ def shared_start(audio_queue):
     p = pyaudio.PyAudio()
     output_stream = make_output_stream()
     wake_model = Model(wakeword_model_paths=[str(model_path)])
+    # Warm up ONNX inference once per process (first predict() is JIT/lazy-slow).
+    # Later sessions just reset() the state — see listen_for_wake_word_or_trigger.
+    silent_chunk = np.zeros(CHUNK, dtype=np.int16)
+    for _ in range(30):
+        wake_model.predict(silent_chunk)
     try:
         asyncio.run(main())
     finally:

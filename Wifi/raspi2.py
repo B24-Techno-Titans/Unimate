@@ -238,6 +238,11 @@ async def setHumid(req:Request):
 
     return {"ok": True}
 
+@app.get("/device-state")
+async def deviceState():
+    """Current desk-device state as known by the bridge (single source of truth)."""
+    return dc.device_state()
+
 # function to delete old files
 def clean_old_files(directory_path,max_files=10):
     files = [os.path.join(directory_path, f) for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]

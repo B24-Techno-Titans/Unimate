@@ -307,17 +307,19 @@ STUDY_TODO_KEYBOARD_H = (
     + dp(8)
 )
 
-SAVED_MCQ_DIR = Path("/home/unimate/Unimate/saved")
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+SAVED_MCQ_DIR = _REPO_ROOT / "saved"
 _SAVED_MCQ_MAX_FILES = 10
 
-QUESTIONS_DIR = Path("/home/unimate/Unimate/questions")
+QUESTIONS_DIR = _REPO_ROOT / "questions"
 QUESTIONS_MAX_FILES = 10
 
-SUMMARIES_DIR = Path("/home/unimate/Unimate/summaries")
+SUMMARIES_DIR = _REPO_ROOT / "summaries"
 SUMMARIES_MAX_FILES = 10
-PDF_MODE_STATUS_PATH = Path("/home/unimate/Unimate/pdf_mode/pdf_mode_status.json")
-VOICE_TRIGGER_PATH = Path("/home/unimate/Unimate/alexa/voice_trigger.json")
-MIC_IN_USE_PATH = Path("/home/unimate/Unimate/shared_mic/mic_in_use.json")
+PDF_MODE_STATUS_PATH = _REPO_ROOT / "pdf_mode" / "pdf_mode_status.json"
+VOICE_TRIGGER_PATH = _REPO_ROOT / "alexa" / "voice_trigger.json"
+MIC_IN_USE_PATH = _REPO_ROOT / "shared_mic" / "mic_in_use.json"
 
 MCQ_LETTERS = ("A", "B", "C", "D")
 TODO_KEYBOARD_ROWS = (

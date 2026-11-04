@@ -52,5 +52,8 @@ def build_controls_screen(state: MockState) -> Screen:
     grid.add_widget(light_basic)
     grid.add_widget(light_color)
 
+    # Let the app-level poll (main.py device sync) refresh all control cards.
+    screen.control_cards = (fan, hum, light_basic, light_color)
+
     screen.add_widget(root)
     return screen

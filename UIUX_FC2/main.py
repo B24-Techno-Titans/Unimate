@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 import json
 
@@ -70,7 +71,14 @@ from dashboard import (  # noqa: E402
     build_study_screen,
 )
 from mock_state import MockState  # noqa: E402
-from raspi_bridge import SensorReadings, fetch_sensors  # noqa: E402
+from raspi_bridge import (  # noqa: E402
+    DeviceState,
+    SensorReadings,
+    fetch_device_state,
+    fetch_sensors,
+    hex_str_to_rgb_tuple,
+    rgb_tuple_to_hex,
+)
 from emotions.morph import RoboMorphWidget  # noqa: E402
 from emotions.selector import build_emotion_screen  # noqa: E402
 from theme import Theme  # noqa: E402
@@ -215,7 +223,8 @@ class UniMateKivyUI(BoxLayout):
         self.sensors_refs = srefs
         self.manager.add_widget(sensors)
 
-        self.manager.add_widget(build_controls_screen(self.state))
+        self._controls_screen = build_controls_screen(self.state)
+        self.manager.add_widget(self._controls_screen)
 
         self.add_widget(self.manager)
 
@@ -230,6 +239,7 @@ class UniMateKivyUI(BoxLayout):
         )
 
         self._idle_ev = None
+        self._last_user_touch_ts = 0.0  # guards device-state sync against in-gesture changes
         self._reset_idle_timer()
 
         self.manager.current = "face"
@@ -243,9 +253,66 @@ class UniMateKivyUI(BoxLayout):
 
         def _poll() -> None:
             readings = fetch_sensors()
-            Clock.schedule_once(lambda _dt: self._apply_sensor_readings(readings), 0)
+            devices = fetch_device_state()
+            Clock.schedule_once(lambda _dt: self._apply_poll(readings, devices), 0)
 
         threading.Thread(target=_poll, daemon=True).start()
+
+    def _apply_poll(
+        self,
+        readings: SensorReadings | None,
+        devices: DeviceState | None,
+    ) -> None:
+        self._apply_sensor_readings(readings)
+        self._apply_device_state(devices)
+
+    def _apply_device_state(self, devices: DeviceState | None) -> None:
+        """Adopt bridge-reported device state so voice-agent changes show up in the UI.
+
+        Skips applying while the user has touched the screen recently, so a slow
+        poll can't stomp a slider drag or button press mid-gesture (the value
+        written by the UI itself arrives through the bridge and matches anyway).
+        """
+        if devices is None:
+            return
+        s = self.state
+        if (time.time() - self._last_user_touch_ts) < 3.0:
+            return  # defer — next tick re-checks once the gesture settles
+
+        changed = False
+        if devices.fan_speed is not None and (
+            devices.fan_speed != s.fan_level or devices.fan_auto != s.auto_fan
+        ):
+            s.set_fan_level(devices.fan_speed)
+            s.auto_fan = devices.fan_auto
+            changed = True
+        if devices.humid_level is not None and (
+            devices.humid_level != s.humidifier_level
+            or devices.humid_auto != s.auto_humidifier
+        ):
+            s.set_humidifier_level(devices.humid_level)
+            s.auto_humidifier = devices.humid_auto
+            changed = True
+        if (
+            devices.light_rgb is not None
+            and devices.light_brightness is not None
+            and (
+                rgb_tuple_to_hex(s.led_color) != devices.light_rgb.lower().lstrip("#")
+                or abs(s.led_brightness - devices.light_brightness / 255.0) > 0.005
+                or devices.light_auto != s.auto_light
+            )
+        ):
+            s.set_led_color(hex_str_to_rgb_tuple(devices.light_rgb))
+            s.set_led(
+                on=devices.light_brightness > 0,
+                brightness=devices.light_brightness / 255.0,
+            )
+            s.auto_light = devices.light_auto
+            changed = True
+
+        if changed:
+            for card in getattr(self._controls_screen, "control_cards", None) or ():
+                card.refresh()
 
     def _apply_sensor_readings(self, readings: SensorReadings | None) -> None:
         self._sensor_poll_busy = False
@@ -281,6 +348,7 @@ class UniMateKivyUI(BoxLayout):
             self.morph_widget.stop()
 
     def _on_user_activity(self, *_args) -> bool:
+        self._last_user_touch_ts = time.time()
         self._reset_idle_timer()
         return False
 
