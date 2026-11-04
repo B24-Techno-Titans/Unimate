@@ -179,3 +179,55 @@ def apply_led_state(
         brightness=brightness,
         auto_light=auto_light,
     )
+
+
+@dataclass
+class DeviceState:
+    """Desk-device state as reported by the bridge (its values are authoritative).
+
+    Fields are None when the bridge hasn't seen a change for that device yet,
+    so the UI should keep its own value instead of clobbering it with a guess.
+    """
+
+    fan_speed: int | None = None  # 0 off, 1 low, 2 fast
+    fan_auto: bool = False
+    humid_level: int | None = None
+    humid_auto: bool = False
+    light_rgb: str | None = None  # hex without '#', e.g. "ff8800"
+    light_brightness: int | None = None  # 0-255 as last requested
+    light_auto: bool = False
+
+
+def fetch_device_state() -> DeviceState | None:
+    data = _get("/device-state")
+    if data is None:
+        return None
+
+    def _opt_int(value: Any) -> int | None:
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    return DeviceState(
+        fan_speed=_opt_int(data.get("fan_speed")),
+        fan_auto=bool(data.get("fan_auto", False)),
+        humid_level=_opt_int(data.get("humid_level")),
+        humid_auto=bool(data.get("humid_auto", False)),
+        light_rgb=data.get("light_rgb") or None,
+        light_brightness=_opt_int(data.get("light_brightness")),
+        light_auto=bool(data.get("light_auto", False)),
+    )
+
+
+def hex_str_to_rgb_tuple(hex_str: str) -> tuple[float, float, float]:
+    """'#ff8800' / 'ff8800' -> (1.0, 0.53, 0.0); malformed input -> white."""
+    hex_str = (hex_str or "").lstrip("#").lower()
+    if len(hex_str) != 6:
+        return (1.0, 1.0, 1.0)
+    try:
+        return tuple(int(hex_str[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+    except ValueError:
+        return (1.0, 1.0, 1.0)

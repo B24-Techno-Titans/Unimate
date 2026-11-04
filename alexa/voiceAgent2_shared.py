@@ -296,6 +296,44 @@ _DEVICE_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="device-
 _DEVICE_DEDUPE_S = 8
 _device_last_run: dict = {}
 
+# Device commands go through the bridge (same endpoints the UI uses) so the UI,
+# the bridge auto-loops and the voice agent share one source of truth for device
+# state. If the bridge is unreachable (standalone testing), fall back to the
+# direct hardware calls — they still work, just without UI sync.
+BRIDGE_URL = os.environ.get("UNIMATE_RASPI_BRIDGE_URL", "http://127.0.0.1:5000").rstrip("/")
+BRIDGE_TIMEOUT_S = 4
+
+
+def _bridge_post(path: str, payload: dict) -> bool:
+    """POST a device command to the bridge. Returns False if unreachable/rejected."""
+    try:
+        r = requests.post(f"{BRIDGE_URL}{path}", json=payload, timeout=BRIDGE_TIMEOUT_S)
+        if r.status_code >= 400:
+            print(f"[BRIDGE] {path} rejected: HTTP {r.status_code}")
+            return False
+        return True
+    except requests.RequestException as e:
+        print(f"[BRIDGE] {path} unreachable — direct fallback ({e.__class__.__name__})")
+        return False
+
+
+def _bridge_get_state() -> dict | None:
+    """Fetch the bridge's current device state snapshot (or None)."""
+    try:
+        r = requests.get(f"{BRIDGE_URL}/device-state", timeout=BRIDGE_TIMEOUT_S)
+        if r.status_code < 400:
+            data = r.json()
+            return data if isinstance(data, dict) else None
+    except (requests.RequestException, ValueError):
+        pass
+    return None
+
+
+def _bridge_set_fan(speed: int) -> None:
+    speed = max(0, min(2, int(speed)))
+    if not _bridge_post("/set-fan", {"fanSpeed": speed, "autoFan": False}):
+        control_fan(speed)  # bridge down: act anyway (won't sync the UI)
+
 
 def run_function_call(name: str, args: dict) -> str:
     """Execute a Gemini tool call on the device executor thread. Returns a status string."""
@@ -303,25 +341,39 @@ def run_function_call(name: str, args: dict) -> str:
         if name == "set_fan":
             speed = int(args.get("speed", 0))
             print(f"[TOOL] set_fan speed={speed}")
-            control_fan(max(0, min(2, speed)))
+            _bridge_set_fan(speed)
             return "ok"
         if name == "set_light":
             on = bool(args.get("on", True))
             if on:
-                kwargs = {"brightness": int(args.get("brightness", 60))}
-                color = args.get("color")
-                if color:
-                    kwargs["rgb"] = str(color).lstrip("#")
-                print(f"[TOOL] set_light on {kwargs}")
-                control_light(**kwargs)
+                brightness_100 = max(0, min(100, int(args.get("brightness", 60))))
+                color = str(args.get("color") or "").lstrip("#").lower()
+                if len(color) != 6:
+                    # No colour asked for: keep whatever is already on the strip.
+                    state = _bridge_get_state() or {}
+                    color = str(state.get("light_rgb") or "ffffff").lower()
+                    if len(color) != 6:
+                        color = "ffffff"
+                print(f"[TOOL] set_light on {color} @{brightness_100}")
+                if not _bridge_post(
+                    "/set-lights",
+                    {
+                        "light": color,
+                        "brightness": min(255, round(brightness_100 * 2.55)),
+                        "autoLight": False,
+                    },
+                ):
+                    control_light(rgb=color, brightness=brightness_100)
             else:
                 print("[TOOL] set_light off")
-                control_light(rgb="000000", brightness=0)
+                if not _bridge_post("/set-lights", {"light": "000000", "brightness": 0, "autoLight": False}):
+                    control_light(rgb="000000", brightness=0)
             return "ok"
         if name == "set_humidifier":
             level = int(args.get("level", 1))
             print(f"[TOOL] set_humidifier level={level}")
-            control_humidifier(1 if level else 0)
+            if not _bridge_post("/set-humid", {"level": 1 if level else 0, "autoHumid": False}):
+                control_humidifier(1 if level else 0)
             return "ok"
         return f"unknown tool: {name}"
     except Exception as e:
@@ -354,12 +406,10 @@ def handle_device_command(cmd_string: str):
 
     if device == "fan":
         try:
-            if action == "on":
-                print("Turning FAN ON")
-                requests.get(FAN_ON_URL, timeout=3)
-            else:
-                print("Turning FAN OFF")
-                requests.get(FAN_OFF_URL, timeout=3)
+            speed = 2 if action == "on" else 0
+            print(f"Setting FAN to speed {speed}")
+            if not _bridge_post("/set-fan", {"fanSpeed": speed, "autoFan": False}):
+                requests.get(FAN_ON_URL if action == "on" else FAN_OFF_URL, timeout=3)
         except requests.RequestException as e:
             print(f"FAN {action.upper()} request failed:", e)
 
@@ -367,23 +417,20 @@ def handle_device_command(cmd_string: str):
         try:
             if action == "on":
                 print("Turning LIGHT ON")
-               
-                requests.get(LED_ON_URL, timeout=3)
-                    
+                if not _bridge_post("/set-lights", {"light": "113456", "brightness": 200, "autoLight": False}):
+                    requests.get(LED_ON_URL, timeout=3)
             else:
                 print("Turning LIGHT OFF")
-                requests.get(LED_OFF_URL, timeout=3)
+                if not _bridge_post("/set-lights", {"light": "000000", "brightness": 0, "autoLight": False}):
+                    requests.get(LED_OFF_URL, timeout=3)
         except requests.RequestException as e:
             print(f"LIGHT {action.upper()} request failed:", e)
-            
-    elif device == "humidifier": 
+
+    elif device == "humidifier":
         print(f"Setting HUMIDIFIER to {action.upper()}")
-        if action == "on":
-            # print("Turning HUMIDIFIER ON")
-            control_humidifier(1)
-        else:
-            # print("Turning HUMIDIFIER OFF")
-            control_humidifier(0)
+        level = 1 if action == "on" else 0
+        if not _bridge_post("/set-humid", {"level": level, "autoHumid": False}):
+            control_humidifier(level)
 
 
 async def audio_input(session, stop_event: asyncio.Event, pre_buffer: list):

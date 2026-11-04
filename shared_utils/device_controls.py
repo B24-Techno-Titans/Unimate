@@ -13,9 +13,16 @@ auto_fan_on = False
 _current_fan_speed = -1
 auto_humid_on = False
 _current_humid_level = -1
+# Last *requested* light values (pre-clamp) — used for /device-state reporting so
+# the UI can show what the user/model asked for, matching the 0-100 device clamp
+# that control_light enforces on the actual hardware request.
+_current_light_rgb = None
+_current_light_brightness = None
 
 # -------------- Basic Device Controls --------------
 def control_fan(speed: int):
+    global _current_fan_speed
+    _current_fan_speed = speed
     try:
         requests.get(f"{FAN_URL}?speed={speed}", timeout=4)
     except Exception as e:
@@ -39,11 +46,15 @@ def control_humidifier(state: int):
         print(f"Error controlling humidifier: {e}")
 
 def control_light(**kwargs):
+    global _current_light_rgb, _current_light_brightness
     params = {}
     colour = kwargs.get("rgb", None)
+    if colour is not None:
+        _current_light_rgb = str(colour)
     brightness = kwargs.get("brightness", None)
-
-    if(brightness != None): params["brightness"] = min(brightness, 100) # limit to 100 for low power usage
+    if brightness is not None:
+        _current_light_brightness = int(brightness)
+        params["brightness"] = min(brightness, 100) # limit to 100 for low power usage
 
     try:
         response = requests.get(LED_URL, params=params, timeout=5)
@@ -58,6 +69,26 @@ def control_light(**kwargs):
 
     except requests.exceptions.RequestException as e:
         print(f"Connection Error: {e}")
+
+# -------------- State snapshot for cross-process sync --------------
+def device_state() -> dict:
+    """Snapshot of everything this module knows about the desk devices.
+
+    Values are None when nothing has been set yet in this bridge process, so
+    callers can distinguish "unknown" from a real level of 0.
+    """
+    humid = getattr(control_humidifier, "current_state", None)
+    if humid is None:
+        humid = None if _current_humid_level < 0 else _current_humid_level
+    return {
+        "fan_speed": None if _current_fan_speed < 0 else _current_fan_speed,
+        "fan_auto": bool(auto_fan_on),
+        "humid_level": humid,
+        "humid_auto": bool(auto_humid_on),
+        "light_rgb": _current_light_rgb,
+        "light_brightness": _current_light_brightness,
+        "light_auto": bool(auto_light_on),
+    }
 
 # -------------- Auto Brightness --------------
 def lux_to_brightness(lux, Lmax=500):
