@@ -7,6 +7,7 @@ import requests
 import math
 import time
 from . import LuxSensor, TempSensor
+from .led_limits import LED_MAX_BRIGHTNESS
 
 auto_light_on = False
 auto_fan_on = False
@@ -61,8 +62,9 @@ def control_light(**kwargs):
     brightness = kwargs.get("brightness", None)
     if brightness is not None:
         # Firmware scale is 0-255 (led.ino constrains brightness to 0-255),
-        # same scale the UI and voice agent use.
-        brightness = max(0, min(255, int(brightness)))
+        # same scale the UI and voice agent use. Capped at LED_MAX_BRIGHTNESS:
+        # the circuit crashes at full brightness, so no sender gets past this.
+        brightness = max(0, min(LED_MAX_BRIGHTNESS, int(brightness)))
         _current_light_brightness = int(brightness)
         params["brightness"] = brightness
 
@@ -123,7 +125,8 @@ def lux_to_brightness(lux, Lmax=500):
         Lmax (float): Maximum expected lux value (default = 1000 for indoor use)
     
     Returns:
-        int: Brightness value between 0 and 255
+        int: Brightness value between 0 and LED_MAX_BRIGHTNESS
+        (the circuit can't take full 255 brightness).
     """
     # Prevent division by zero or negative lux
     lux = max(lux, 0)
@@ -132,8 +135,8 @@ def lux_to_brightness(lux, Lmax=500):
     # brightness = 255 * (math.log(1 + lux) / math.log(1 + Lmax))
     brightness = 255 * (1 - (math.log(1 + lux) / math.log(1 + Lmax)))
     
-    # Limit to 0–255 range
-    return int(min(150, max(0, brightness)))
+    # Limit to 0–LED_MAX_BRIGHTNESS range
+    return int(min(LED_MAX_BRIGHTNESS, max(0, brightness)))
 
 # Test Values
 # lux_values = [0, 10, 100, 500, 1000]

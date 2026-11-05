@@ -73,6 +73,7 @@ from dashboard import (  # noqa: E402
 from mock_state import MockState  # noqa: E402
 from raspi_bridge import (  # noqa: E402
     DeviceState,
+    LED_MAX_BRIGHTNESS,
     SensorReadings,
     fetch_device_state,
     fetch_sensors,
@@ -298,14 +299,14 @@ class UniMateKivyUI(BoxLayout):
             and devices.light_brightness is not None
             and (
                 rgb_tuple_to_hex(s.led_color) != devices.light_rgb.lower().lstrip("#")
-                or abs(s.led_brightness - devices.light_brightness / 255.0) > 0.005
+                or abs(s.led_brightness - devices.light_brightness / LED_MAX_BRIGHTNESS) > 0.005
                 or devices.light_auto != s.auto_light
             )
         ):
             s.set_led_color(hex_str_to_rgb_tuple(devices.light_rgb))
             s.set_led(
                 on=devices.light_brightness > 0,
-                brightness=devices.light_brightness / 255.0,
+                brightness=devices.light_brightness / LED_MAX_BRIGHTNESS,
             )
             s.auto_light = devices.light_auto
             changed = True

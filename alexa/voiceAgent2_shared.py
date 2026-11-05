@@ -16,10 +16,11 @@ import requests
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 from shared_utils.device_controls import control_fan, control_humidifier, control_light
+from shared_utils.led_limits import LED_MAX_BRIGHTNESS
 # from Final_Codes.NLP.humidifier import set_humidifier
 
-# LED URLs
-LED_ON_URL  = "http://led-controller.local/set-colour?rgb=%23113456&brightness=200"
+# LED URLs (brightness capped at LED_MAX_BRIGHTNESS: circuit crashes at max)
+LED_ON_URL  = f"http://led-controller.local/set-colour?rgb=%23113456&brightness={LED_MAX_BRIGHTNESS}"
 LED_OFF_URL = "http://led-controller.local/set-colour?rgb=%23000000&brightness=0"
 
 # FAN URL (HTTP API placeholder)
@@ -347,6 +348,9 @@ def run_function_call(name: str, args: dict) -> str:
             on = bool(args.get("on", True))
             if on:
                 brightness_100 = max(0, min(100, int(args.get("brightness", 60))))
+                # 0-100 speaker scale -> 0-LED_MAX_BRIGHTNESS firmware scale
+                # (bridge clamps anyway, but keep both paths consistent).
+                brightness_raw = round(brightness_100 * LED_MAX_BRIGHTNESS / 100)
                 color = str(args.get("color") or "").lstrip("#").lower()
                 if len(color) != 6:
                     # No colour asked for: keep whatever is already on the strip.
@@ -359,11 +363,11 @@ def run_function_call(name: str, args: dict) -> str:
                     "/set-lights",
                     {
                         "light": color,
-                        "brightness": min(255, round(brightness_100 * 2.55)),
+                        "brightness": brightness_raw,
                         "autoLight": False,
                     },
                 ):
-                    control_light(rgb=color, brightness=brightness_100)
+                    control_light(rgb=color, brightness=brightness_raw)
             else:
                 print("[TOOL] set_light off")
                 if not _bridge_post("/set-lights", {"light": "000000", "brightness": 0, "autoLight": False}):
@@ -417,7 +421,10 @@ def handle_device_command(cmd_string: str):
         try:
             if action == "on":
                 print("Turning LIGHT ON")
-                if not _bridge_post("/set-lights", {"light": "113456", "brightness": 200, "autoLight": False}):
+                if not _bridge_post(
+                    "/set-lights",
+                    {"light": "113456", "brightness": LED_MAX_BRIGHTNESS, "autoLight": False},
+                ):
                     requests.get(LED_ON_URL, timeout=3)
             else:
                 print("Turning LIGHT OFF")

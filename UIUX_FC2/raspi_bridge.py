@@ -9,6 +9,8 @@ from typing import Any
 
 import requests
 
+from shared_utils.led_limits import LED_MAX_BRIGHTNESS
+
 DEFAULT_BASE_URL = "http://127.0.0.1:5000"
 REQUEST_TIMEOUT_S = 5.0
 
@@ -147,7 +149,8 @@ def set_lights(
     brightness: int,
     auto_light: bool = False,
 ) -> bool:
-    brightness = max(0, min(255, int(brightness)))
+    # Cap at LED_MAX_BRIGHTNESS — the circuit crashes at full brightness.
+    brightness = max(0, min(LED_MAX_BRIGHTNESS, int(brightness)))
     rgb_hex = rgb_hex.lstrip("#").lower()
     if len(rgb_hex) != 6:
         rgb_hex = "ffffff"
@@ -173,7 +176,9 @@ def apply_led_state(
     auto_light: bool = False,
 ) -> bool:
     """Push ambient light state via /set-lights (brightness 0 when off)."""
-    brightness = int(round(led_brightness * 255)) if led_on else 0
+    # led_brightness is a 0.0-1.0 UI fraction; 1.0 maps to LED_MAX_BRIGHTNESS
+    # (not 255) — the circuit crashes at full brightness.
+    brightness = int(round(led_brightness * LED_MAX_BRIGHTNESS)) if led_on else 0
     return set_lights(
         rgb_hex=rgb_tuple_to_hex(led_color),
         brightness=brightness,
@@ -194,7 +199,7 @@ class DeviceState:
     humid_level: int | None = None
     humid_auto: bool = False
     light_rgb: str | None = None  # hex without '#', e.g. "ff8800"
-    light_brightness: int | None = None  # 0-255 as last requested
+    light_brightness: int | None = None  # 0-LED_MAX_BRIGHTNESS as last requested
     light_auto: bool = False
 
 

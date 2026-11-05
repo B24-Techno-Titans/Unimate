@@ -17,7 +17,14 @@ from kivy.uix.slider import Slider
 from kivy.uix.widget import Widget
 
 from mock_state import MockState
-from raspi_bridge import apply_led_state, rgb_tuple_to_hex, set_fan, set_humidifier, set_lights
+from raspi_bridge import (
+    LED_MAX_BRIGHTNESS,
+    apply_led_state,
+    rgb_tuple_to_hex,
+    set_fan,
+    set_humidifier,
+    set_lights,
+)
 from theme import Theme
 from widgets.animations import DeviceViz
 from widgets.common import (
@@ -412,7 +419,9 @@ class LightBasicCard(GlowPanel):
         prev = self.state.auto_light
         self.state.auto_light = value
         brightness = (
-            int(round(self.state.led_brightness * 255)) if led_effective_on(self.state) else 0
+            int(round(self.state.led_brightness * LED_MAX_BRIGHTNESS))
+            if led_effective_on(self.state)
+            else 0
         )
 
         def _call() -> bool:
@@ -573,7 +582,9 @@ class LightColorCard(GlowPanel):
         prev = self.state.auto_light
         self.state.auto_light = value
         brightness = (
-            int(round(self.state.led_brightness * 255)) if led_effective_on(self.state) else 0
+            int(round(self.state.led_brightness * LED_MAX_BRIGHTNESS))
+            if led_effective_on(self.state)
+            else 0
         )
 
         def _call() -> bool:
