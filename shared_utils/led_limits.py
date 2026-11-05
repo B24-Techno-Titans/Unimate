@@ -6,4 +6,4 @@ LED_MAX_BRIGHTNESS before/requesting hardware. Raise only in small steps and
 re-test on the hardware afterwards.
 """
 
-LED_MAX_BRIGHTNESS = 150
+LED_MAX_BRIGHTNESS = 100
