@@ -226,3 +226,5 @@ piper/
 
 # Temporary ignore
 Requirements/
+# unimate_ctl.sh runtime logs
+logs/

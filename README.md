@@ -47,6 +47,16 @@ The UI talks to the bridge at `http://127.0.0.1:5000` (override with `UNIMATE_RA
 
 ## Quick start (typical session)
 
+**Easiest way — the service manager (detects running services, starts/stop cleanly, `./unimate_ctl.sh` alone opens a curses dashboard over SSH):**
+
+```bash
+./unimate_ctl.sh status          # what is running right now
+./unimate_ctl.sh start all       # bridge + combined UI/voice stack
+./unimate_ctl.sh stop all        # everything, gracefully (SIGINT-first)
+```
+
+Or start services manually as below.
+
 Run these on the Pi. Use **separate terminals** (or a process manager) so each service stays up.
 
 ### 1. Bridge API (start first)

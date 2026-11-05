@@ -62,7 +62,7 @@ GPIO.setup(sensor, GPIO.IN)
 try:
     while True:
         if GPIO.input(sensor):
-            print("Touch Detected")
+            if __name__ == "__main__": print("Touch Detected")
             time.sleep(1)
             move_ears()
             time.sleep(1)
