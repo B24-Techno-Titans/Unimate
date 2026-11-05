@@ -228,3 +228,6 @@ piper/
 Requirements/
 # unimate_ctl.sh runtime logs
 logs/
+
+# soloist API key (spotify service)
+spotify.env

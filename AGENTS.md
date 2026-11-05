@@ -13,7 +13,7 @@ UniMate: Raspberry Pi smart desk companion — Kivy touch UI, FastAPI bridge to 
 
 ## How to run (all on the Pi)
 
-**Service manager**: `./unimate_ctl.sh` at the repo root — `status [--json]`, `start|stop|restart bridge|ui|ui-solo|voice-solo|ears|face_follow|all`, `camera on|off|toggle|status`, `logs <svc> [-f]`; **no args from a TTY opens the curses dashboard** (`unimate_tui.py`, needs a TTY + `~/unimate` python). It sets PYTHONPATH itself (worktree-safe) and stops services SIGINT-first (mirrors capture_server/uvicorn cleanup). `all` = core only (bridge + ui, camera-off on stop); solos (`ui-solo`, `voice-solo`, `ears`, `face_follow`) are never touched by `all`.
+**Service manager**: `./unimate_ctl.sh` at the repo root — `status [--json]`, `start|stop|restart bridge|ui|ui-solo|voice-solo|ears|face_follow|spotify|all`, `camera on|off|toggle|status`, `logs <svc> [-f]`; **no args from a TTY opens the curses dashboard** (`unimate_tui.py`, needs a TTY + `~/unimate` python). It sets PYTHONPATH itself (worktree-safe) and stops services SIGINT-first (mirrors capture_server/uvicorn cleanup). `all` = the full desk set (bridge + ui + ears + face_follow + spotify, per-service failures don't abort the run — summary shows ✓/✗); `camera`, `ui-solo`, `voice-solo` stay strictly individual. `spotify` runs `soloist` (binary in `/usr/local/bin`) with `$SOLOIST_API_KEY` from the shell or a gitignored `spotify.env` next to the script.
 
 Imports are flat/root-relative (`from alexa import …`, `from dashboard import …`) and resolve via PYTHONPATH, not the cwd — when code "mysteriously" imports the wrong copy, check `PYTHONPATH`.
 

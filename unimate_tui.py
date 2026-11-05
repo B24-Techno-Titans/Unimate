@@ -16,16 +16,22 @@ import time
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CTL = os.environ.get("UNIMATE_CTL") or os.path.join(SCRIPT_DIR, "unimate_ctl.sh")
 
-# (ctl id, json key, column label, description)
-ROWS = [
-    ("bridge",      "bridge",      "bridge",     "Wifi/raspi2.py uvicorn :5000"),
-    ("ui",          "ui",          "ui stack",   "capture_server.py (mic+voice+UI)"),
-    ("ui-solo",     "ui_solo",     "ui-solo",    "UIUX_FC2/main.py standalone"),
-    ("voice-solo",  "voice_solo",  "voice-solo", "alexa/voiceAgent2.py standalone"),
-    ("ears",        "ears",        "ears",       "ear touch sweep (PCA9685, ch4/5)"),
-    ("face_follow", "face_follow", "face_follow","camera face tracking + servos"),
-    ("camera",      "camera",      "camera",     "mediamtx + ngrok (bridge /online)"),
+# Core group = everything "start all" manages; rendered on top of the dashboard.
+# Other group = strictly individual services; separated by a visual rule line.
+CORE_ROWS = [
+    ("bridge",      "bridge",      "bridge",      "Wifi/raspi2.py uvicorn :5000"),
+    ("ui",          "ui",          "ui stack",    "capture_server.py (mic+voice+UI)"),
+    ("ears",        "ears",        "ears",        "ear touch sweep (PCA9685, ch4/5)"),
+    ("face_follow", "face_follow", "face_follow", "camera face tracking + servos"),
+    ("spotify",     "spotify",     "spotify",     "soloist device (ws :9090)"),
 ]
+OTHER_ROWS = [
+    ("ui-solo",     "ui_solo",     "ui-solo",     "UIUX_FC2/main.py standalone"),
+    ("voice-solo",  "voice_solo",  "voice-solo",  "alexa/voiceAgent2.py standalone"),
+    ("camera",      "camera",      "camera",      "mediamtx + ngrok (bridge /online)"),
+]
+ROWS = CORE_ROWS + OTHER_ROWS          # display + selection order (flattened)
+SEPARATOR_LABEL = " other (managed individually) "
 
 TARGETS = {row[0] for row in ROWS if row[0] != "camera"}
 
@@ -36,12 +42,13 @@ LOG_FILES = {
     "voice-solo": "logs/voice-solo.log",
     "ears": "logs/ears.log",
     "face_follow": "logs/face_follow.log",
+    "spotify": "logs/spotify.log",
 }
 
 C_GREEN, C_RED, C_YELLOW, C_CYAN = 1, 2, 3, 4
 
 REFRESH_TICKS = 4  # 250 ms key tick -> status refresh every 1 s
-MIN_H, MIN_W = len(ROWS) + 5, 62
+MIN_H, MIN_W = len(ROWS) + 6, 62
 
 
 def human_time(seconds) -> str:
@@ -178,17 +185,25 @@ class TUI:
         running = self.pending  # alias
         self.pending_by_sid = {p["jkey"]: p for p in running.values()}
 
-        for i, (sid, jkey, label, desc) in enumerate(ROWS):
-            y = 2 + i
-            pend = self.pending_by_sid.get(jkey) or self.pending_by_sid.get("all")
-            if pend and (pend["jkey"] == jkey or pend["jkey"] == "all"):
-                state, pair, detail = f"{pend['verb']}…", C_YELLOW, f"ctl {pend['verb']} in progress"
-            else:
-                state, pair, detail = self.row_state(jkey)
-            pid_txt = str(self.pid_of(jkey)) if state.startswith("running") else "-"
-            line = f"{label:<12}{state:>11}{pid_txt:>7}  {detail}"
-            attr = curses.A_REVERSE if i == self.sel else 0
-            stdscr.addnstr(y, 0, line[:w - 1], w - 1, attr | curses.color_pair(pair))
+        y, flat = 2, 0
+        for gnum, group in enumerate((CORE_ROWS, OTHER_ROWS)):
+            if gnum > 0:  # visual rule between "all" managed and individually managed
+                rule = ("─" * 3) + SEPARATOR_LABEL + ("─" * 60)
+                stdscr.addnstr(y, 0, rule[:w - 1], w - 1, curses.A_DIM)
+                y += 1
+            for row in group:
+                sid, jkey, label, desc = row
+                pend = self.pending_by_sid.get(jkey) or self.pending_by_sid.get("all")
+                if pend:
+                    state, pair, detail = f"{pend['verb']}…", C_YELLOW, f"ctl {pend['verb']} in progress"
+                else:
+                    state, pair, detail = self.row_state(jkey)
+                pid_txt = str(self.pid_of(jkey)) if state.startswith("running") else "-"
+                line = f"{label:<12}{state:>11}{pid_txt:>7}  {detail}"
+                attr = curses.A_REVERSE if flat == self.sel else 0
+                stdscr.addnstr(y, 0, line[:w - 1], w - 1, attr | curses.color_pair(pair))
+                y += 1
+                flat += 1
 
         keys = "↑/↓ select  s start  x stop  r restart  l logs  c camera  a start-all  X stop-all  q quit"
         stdscr.addnstr(h - 2, 0, keys[:w - 1], w - 1, curses.A_DIM)

@@ -40,6 +40,12 @@ UVICORN="$HOME/unimate/bin/uvicorn"
 if [ ! -x "$PYBIN" ]; then PYBIN="$(command -v python3)"; fi
 if [ ! -x "$UVICORN" ]; then UVICORN="$PYBIN -m uvicorn"; fi
 
+# spotify (soloist device): key from shell env or spotify.env (gitignored)
+SPOT_ENV="${UNIMATE_SPOTIFY_ENV:-$SCRIPT_DIR/spotify.env}"
+if [ -f "$SPOT_ENV" ]; then
+  set -a; . "$SPOT_ENV"; set +a
+fi
+
 BASE_URL="${UNIMATE_RASPI_BRIDGE_URL:-http://127.0.0.1:5000}"
 BRIDGE_PORT="${BASE_URL##*:}"
 
@@ -50,6 +56,7 @@ PAT_UI_SOLO='python3? +main\.py( |$)'
 PAT_VOICE='alexa/voiceAgent2\.py( |$)'
 PAT_EARS='ears/ear\.py'
 PAT_FACE='CV/new/no_emo_flipped_headless\.py'
+PAT_SPOTIFY='soloist[^\n]*--device-name'
 
 LOG_BRIDGE="$LOGS_DIR/bridge.log"
 LOG_UI="$LOGS_DIR/ui.log"
@@ -57,6 +64,7 @@ LOG_UI_SOLO="$LOGS_DIR/ui-solo.log"
 LOG_VOICE="$LOGS_DIR/voice-solo.log"
 LOG_EARS="$LOGS_DIR/ears.log"
 LOG_FACE="$LOGS_DIR/face_follow.log"
+LOG_SPOTIFY="$LOGS_DIR/spotify.log"
 
 # ---------------------------------------------------------------- helpers
 
@@ -144,7 +152,7 @@ cmd_status() {
   local as_json=0 a
   for a in "$@"; do [ "$a" = "--json" ] && as_json=1; done
 
-  local b_pid b_up b_health ui_pid ui_up us_pid us_up vs_pid vs_up e_pid e_up ff_pid ff_up
+  local b_pid b_up b_health ui_pid ui_up us_pid us_up vs_pid vs_up e_pid e_up ff_pid ff_up sp_pid sp_up
   local cam cmm cng
   b_pid="$(pid_of "$PAT_BRIDGE")";    b_up="$(up_of "$b_pid")"
   ui_pid="$(pid_of "$PAT_UI")";       ui_up="$(up_of "$ui_pid")"
@@ -152,6 +160,7 @@ cmd_status() {
   vs_pid="$(pid_of "$PAT_VOICE")";    vs_up="$(up_of "$vs_pid")"
   e_pid="$(pid_of "$PAT_EARS")";      e_up="$(up_of "$e_pid")"
   ff_pid="$(pid_of "$PAT_FACE")";     ff_up="$(up_of "$ff_pid")"
+  sp_pid="$(pid_of "$PAT_SPOTIFY")";  sp_up="$(up_of "$sp_pid")"
   cmm="$(pgrep -x mediamtx 2>/dev/null | head -1)"
   cng="$(pgrep -x ngrok 2>/dev/null | head -1)"
   if [ -n "$cmm" ]; then cam=on; else cam=off; fi
@@ -182,6 +191,9 @@ cmd_status() {
     printf ',"face_follow":{"running":%s,"pid":%s,"uptime_s":%d}' \
       "$([ -n "$ff_pid" ] && echo true || echo false)" \
       "${ff_pid:-null}" "${ff_up%%.*}"
+    printf ',"spotify":{"running":%s,"pid":%s,"uptime_s":%d}' \
+      "$([ -n "$sp_pid" ] && echo true || echo false)" \
+      "${sp_pid:-null}" "${sp_up%%.*}"
     printf ',"camera":{"on":%s,"mediamtx_pid":%s,"ngrok_pid":%s}' \
       "$([ "$cam" = on ] && echo true || echo false)" \
       "${cmm:-null}" "${cng:-null}"
@@ -196,18 +208,23 @@ cmd_status() {
     st=Stopped; [ -n "$ui_pid" ] && st=Running
     printf '%-11s %-15s %-8s %-9s %s\n' "ui" "$st" "${ui_pid:--}" "$(human_time "$ui_up")" \
       "capture_server.py (mic+voice+UI)"
-    st=Stopped; [ -n "$us_pid" ] && st=Running
-    printf '%-11s %-15s %-8s %-9s %s\n' "ui-solo" "$st" "${us_pid:--}" "$(human_time "$us_up")" \
-      "UIUX_FC2/main.py standalone"
-    st=Stopped; [ -n "$vs_pid" ] && st=Running
-    printf '%-11s %-15s %-8s %-9s %s\n' "voice-solo" "$st" "${vs_pid:--}" "$(human_time "$vs_up")" \
-      "alexa/voiceAgent2.py standalone"
     st=Stopped; [ -n "$e_pid" ] && st=Running
     printf '%-11s %-15s %-8s %-9s %s\n' "ears" "$st" "${e_pid:--}" "$(human_time "$e_up")" \
       "ear touch sweep (PCA9685)"
     st=Stopped; [ -n "$ff_pid" ] && st=Running
     printf '%-11s %-15s %-8s %-9s %s\n' "face_follow" "$st" "${ff_pid:--}" "$(human_time "$ff_up")" \
       "camera face tracking + servos"
+    st=Stopped; [ -n "$sp_pid" ] && st=Running
+    printf '%-11s %-15s %-8s %-9s %s\n' "spotify" "$st" "${sp_pid:--}" "$(human_time "$sp_up")" \
+      "soloist device (ws :9090)"
+    say ""
+    say "── solo: start/stop individually ─────────────────────────"
+    st=Stopped; [ -n "$us_pid" ] && st=Running
+    printf '%-11s %-15s %-8s %-9s %s\n' "ui-solo" "$st" "${us_pid:--}" "$(human_time "$us_up")" \
+      "UIUX_FC2/main.py standalone"
+    st=Stopped; [ -n "$vs_pid" ] && st=Running
+    printf '%-11s %-15s %-8s %-9s %s\n' "voice-solo" "$st" "${vs_pid:--}" "$(human_time "$vs_up")" \
+      "alexa/voiceAgent2.py standalone"
     printf '%-11s %-15s %-8s %-9s %s\n' "camera" "$cam" "${cmm:--}" "-" \
       "$([ "$cam" = on ] && echo "mediamtx pid $cmm${cng:+ + ngrok pid $cng}" || echo "not running")"
     return 0
@@ -335,6 +352,25 @@ start_face_follow() {
   fi
 }
 
+start_spotify() {
+  if [ -n "$(pid_of "$PAT_SPOTIFY")" ]; then say "spotify: already running ($(pid_of "$PAT_SPOTIFY"))"; return 0; fi
+  if [ -z "${SOLOIST_API_KEY:-}" ]; then
+    die "spotify: SOLOIST_API_KEY not set — export it or put it in $SPOT_ENV (gitignored)"
+  fi
+  say "spotify: starting soloist device (log: $LOG_SPOTIFY)"
+  (
+    cd "$SCRIPT_DIR" || exit 1
+    exec setsid soloist --device-name "Unimate" --api-key "$SOLOIST_API_KEY" --ws 127.0.0.1:9090
+  ) >>"$LOG_SPOTIFY" 2>&1 &
+  disown
+  sleep 2
+  if [ -n "$(pid_of "$PAT_SPOTIFY")" ]; then
+    say "spotify: running (pid $(pid_of "$PAT_SPOTIFY"))"
+  else
+    die "spotify: failed to start (last log lines:) $(tail_log "$LOG_SPOTIFY")"
+  fi
+}
+
 cmd_start() {
   case "${1:-}" in
     bridge) start_bridge ;;
@@ -343,9 +379,27 @@ cmd_start() {
     voice-solo) start_voice_solo ;;
     ears) start_ears ;;
     face_follow) start_face_follow ;;
-    all) start_bridge; start_ui ;;
-    *) die "start: expected bridge|ui|ui-solo|voice-solo|ears|face_follow|all" ;;
+    spotify) start_spotify ;;
+    all) start_all ;;
+    *) die "start: expected bridge|ui|ui-solo|voice-solo|ears|face_follow|spotify|all" ;;
   esac
+}
+
+start_all() {
+  # full desk set: bridge → ui → ears → face_follow → spotify.
+  # ui-solo / voice-solo / camera stay strictly individual.
+  # Each starter runs in a subshell so a die (e.g. missing API key, dead
+  # servo hardware) aborts only that service, not the whole run.
+  local failed=0 marks=() sid
+  for sid in bridge ui ears face_follow spotify; do
+    if ( "start_$sid" ); then
+      marks+=("$sid✓")
+    else
+      marks+=("$sid✗"); failed=1
+    fi
+  done
+  say "all: ${marks[*]}"
+  return "$failed"
 }
 
 # ---------------------------------------------------------------- stop
@@ -356,6 +410,7 @@ stop_ui_solo()    { stop_by_pattern "$PAT_UI_SOLO" "ui-solo" 5; }
 stop_voice()      { stop_by_pattern "$PAT_VOICE"  "voice-solo" 5; }
 stop_ears()       { stop_by_pattern "$PAT_EARS"   "ears" 5; }
 stop_face_follow(){ stop_by_pattern "$PAT_FACE"   "face_follow" 5; }
+stop_spotify()    { stop_by_pattern "$PAT_SPOTIFY" "spotify" 5; }
 
 camera_off() {
   if ! health; then warn "bridge not running — only orphan sweep"; else
@@ -410,14 +465,18 @@ cmd_stop() {
     voice-solo) stop_voice ;;
     ears) stop_ears ;;
     face_follow) stop_face_follow ;;
+    spotify) stop_spotify ;;
     all)
-      # all = core only; solo services (ui-solo, voice-solo, ears, face_follow) are
-      # managed strictly individually and are never touched by all.
+      # full desk set only (bridge, ui, ears, face_follow, spotify);
+      # camera + ui-solo / voice-solo are managed individually and untouched.
       camera_off
-      stop_ui
-      stop_bridge
+      local marks=() sid
+      for sid in ui bridge ears face_follow spotify; do
+        if "stop_$sid"; then marks+=("$sid✓"); else marks+=("$sid✗"); fi
+      done
+      say "stop all: ${marks[*]}"
       ;;
-    *) die "stop: expected bridge|ui|ui-solo|voice-solo|ears|face_follow|all [--force]" ;;
+    *) die "stop: expected bridge|ui|ui-solo|voice-solo|ears|face_follow|spotify|all [--force]" ;;
   esac
 }
 
@@ -427,8 +486,9 @@ cmd_restart() {
     ui)     stop_ui;      start_ui ;;
     ears)   stop_ears;    start_ears ;;
     face_follow) stop_face_follow; start_face_follow ;;
-    all)    cmd_stop all; start_bridge; start_ui ;;
-    *) die "restart: expected bridge|ui|ears|face_follow|all" ;;
+    spotify) stop_spotify; start_spotify ;;
+    all)    cmd_stop all; start_all ;;
+    *) die "restart: expected bridge|ui|ears|face_follow|spotify|all" ;;
   esac
 }
 
@@ -438,16 +498,20 @@ UniMate service manager. No arguments (from a TTY) opens the curses dashboard.
 
 Usage:
   unimate_ctl.sh status [--json]
-  unimate_ctl.sh start  bridge|ui|ui-solo|voice-solo|ears|face_follow|all
-  unimate_ctl.sh stop   bridge|ui|ui-solo|voice-solo|ears|face_follow|all [--force]
-  unimate_ctl.sh restart bridge|ui|ears|face_follow|all
-  unimate_ctl.sh logs   bridge|ui|ui-solo|voice-solo|ears|face_follow [-f] [-n N]
+  unimate_ctl.sh start  bridge|ui|ui-solo|voice-solo|ears|face_follow|spotify|all
+  unimate_ctl.sh stop   bridge|ui|ui-solo|voice-solo|ears|face_follow|spotify|all [--force]
+  unimate_ctl.sh restart bridge|ui|ears|face_follow|spotify|all
+  unimate_ctl.sh logs   bridge|ui|ui-solo|voice-solo|ears|face_follow|spotify [-f] [-n N]
   unimate_ctl.sh camera on|off|toggle|status
 
 Notes:
-- "all" = the core only: bridge + ui stack (+ camera off on stop). Solo services
-  (ui-solo, voice-solo, ears, face_follow) are never started/stopped by "all";
-  manage them individually.
+- "all" starts/stops the full desk set: bridge + ui stack + ears + face_follow + spotify.
+  camera, ui-solo and voice-solo stay strictly individual (never touched by "all").
+  A failing service (e.g. missing API key) does not abort the rest — each is tried and
+  the summary shows ✓/✗ per service.
+- spotify runs `soloist --device-name "Unimate" --api-key $SOLOIST_API_KEY --ws 127.0.0.1:9090`;
+  the key comes from the shell env or `spotify.env` (gitignored) next to this script
+  (override the file path with UNIMATE_SPOTIFY_ENV).
 - stop sends SIGINT first (mirrors capture_server.py's KeyboardInterrupt cleanup,
   ears' GPIO.cleanup(), and uvicorn's FastAPI shutdown LED-off), then SIGTERM, then SIGKILL.
 - bridge always runs from Wifi/ and expects port 5000; the rest run from the checkout root.
@@ -458,7 +522,7 @@ EOF
 
 cmd_logs() {
   local which="${1:-}" follow=0 n=40
-  [ -z "$which" ] && die "logs: expected bridge|ui|ui-solo|voice-solo|ears|face_follow"
+  [ -z "$which" ] && die "logs: expected bridge|ui|ui-solo|voice-solo|ears|face_follow|spotify"
   shift
   local file
   case "$which" in
@@ -468,7 +532,8 @@ cmd_logs() {
     voice-solo) file="$LOG_VOICE" ;;
     ears) file="$LOG_EARS" ;;
     face_follow) file="$LOG_FACE" ;;
-    *) die "logs: expected bridge|ui|ui-solo|voice-solo|ears|face_follow" ;;
+    spotify) file="$LOG_SPOTIFY" ;;
+    *) die "logs: expected bridge|ui|ui-solo|voice-solo|ears|face_follow|spotify" ;;
   esac
   while [ $# -gt 0 ]; do
     case "$1" in
